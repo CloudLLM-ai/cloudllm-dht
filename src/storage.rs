@@ -416,15 +416,16 @@ impl DefaultStorage {
             if to_pick == 0 {
                 break;
             }
-            // Pick with probability about <left to pick> / <left in the set>.
-            // libtorrent draws from the *inclusive* range [0, candidates] and
-            // keeps the key when the draw is <= to_pick, so the odds are
-            // (to_pick + 1) / (candidates + 1): slightly biased towards
-            // early keys, and certain once candidates == to_pick, which is
-            // what guarantees `count` picks. Kept as is for fidelity.
-            let draw = rng.random(candidates);
+            // Pick with probability <left to pick> / <left in the set>: a
+            // uniform draw from 0..candidates is below to_pick with exactly
+            // that probability, and always once candidates == to_pick, which
+            // guarantees `count` picks. (libtorrent draws from the inclusive
+            // range 0..=candidates and keeps the key when the draw is <=
+            // to_pick, odds (to_pick + 1) / (candidates + 1): biased towards
+            // early keys. Fixed here; see PORTING.md.)
+            let draw = rng.random(candidates.saturating_sub(1));
             candidates = candidates.saturating_sub(1);
-            if usize::try_from(draw).map_or(true, |d| d > to_pick) {
+            if usize::try_from(draw).map_or(true, |d| d >= to_pick) {
                 continue;
             }
             samples.push(*key);
@@ -772,11 +773,11 @@ impl DefaultStorage {
                 continue;
             }
             // Pick this peer with probability <left to pick> / <left in the
-            // set>, with libtorrent's inclusive draw (see
-            // `refresh_infohashes_sample`).
-            let draw = rng.random(u32::try_from(candidates).unwrap_or(u32::MAX));
+            // set>, uniformly (see `refresh_infohashes_sample` for the
+            // difference from libtorrent's inclusive draw).
+            let draw = rng.random(u32::try_from(candidates - 1).unwrap_or(u32::MAX));
             candidates -= 1;
-            if usize::try_from(draw).map_or(true, |d| d > to_pick) {
+            if usize::try_from(draw).map_or(true, |d| d >= to_pick) {
                 continue;
             }
             let mut compact = Vec::with_capacity(18);

@@ -1104,3 +1104,57 @@ fn test_counters_reset() {
     c.reset();
     assert_eq!(c, StorageCounters::default());
 }
+
+/// Regression test for libtorrent's biased pick (`dht_storage.cpp` line 279:
+/// the inclusive draw keeps a peer with odds `(k+1)/(n+1)`). With two peers
+/// and a reply of one, each must be chosen about half the time; the original
+/// algorithm picks the first about two thirds of the time. Seeded, with
+/// bounds about 7 standard deviations wide.
+#[test]
+fn test_get_peers_pick_is_uniform() {
+    let settings = DhtSettings {
+        max_peers_reply: 1,
+        ..test_settings()
+    };
+    let (s0, _) = create_default_dht_storage(&settings);
+    let mut s = s0;
+    let n1 = n("01");
+    s.announce_peer(&n1, ep("1.1.1.1", 1), "", false);
+    s.announce_peer(&n1, ep("2.2.2.2", 1), "", false);
+    let first = (0..3000)
+        .filter(|_| {
+            let reply = peers_of(&s, &n1, v4_any());
+            assert_eq!(values(&reply).len(), 1);
+            values(&reply)[0].as_bytes().unwrap()[0] == 1
+        })
+        .count();
+    assert!(
+        (1300..1700).contains(&first),
+        "first peer picked {first} of 3000"
+    );
+}
+
+/// Same for the BEP 51 sample (`dht_storage.cpp` line 629).
+#[test]
+fn test_infohashes_sample_pick_is_uniform() {
+    let settings = DhtSettings {
+        sample_infohashes_interval: 0,
+        max_infohashes_sample_count: 1,
+        ..test_settings()
+    };
+    let (mut s, _) = create_default_dht_storage(&settings);
+    let (a, b) = (n("01"), n("02"));
+    s.announce_peer(&a, ep("1.1.1.1", 1), "", false);
+    s.announce_peer(&b, ep("2.2.2.2", 1), "", false);
+    let first = (0..3000)
+        .filter(|_| {
+            let mut e = Entry::Undefined;
+            assert_eq!(s.get_infohashes_sample(&mut e), 1);
+            e.get("samples").unwrap().as_bytes().unwrap() == a.0
+        })
+        .count();
+    assert!(
+        (1300..1700).contains(&first),
+        "first hash sampled {first} of 3000"
+    );
+}
