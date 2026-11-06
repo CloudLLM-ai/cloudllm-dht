@@ -47,6 +47,35 @@ pub enum Event {
     /// A bootstrap traversal finished (the `done_callback` passed to
     /// `node::bootstrap`).
     BootstrapDone,
+    /// A remote node asked us for peers (libtorrent
+    /// `dht_observer::get_peers`).
+    IncomingGetPeers {
+        /// The info-hash asked for.
+        info_hash: NodeId,
+        /// The requester.
+        from: SocketAddr,
+    },
+    /// A remote node announced itself with a valid write token (libtorrent
+    /// `dht_observer::announce`; fired before the token is checked, as in
+    /// libtorrent).
+    IncomingAnnounce {
+        /// The announced info-hash.
+        info_hash: NodeId,
+        /// The announcer's address.
+        from: std::net::IpAddr,
+        /// The port it announced (or its source port with `implied_port`).
+        port: u16,
+    },
+    /// A remote node told us our external address (the `ip` key of a
+    /// message that arrived on the node's own socket; libtorrent
+    /// `dht_observer::set_external_address`). Vote on it, then call
+    /// `Dht::set_external_address` once confident.
+    ExternalAddress {
+        /// The address the remote claims to see us at.
+        addr: std::net::IpAddr,
+        /// The remote node's address.
+        source: std::net::IpAddr,
+    },
     /// The `get_peers` query was about to go out to `to` (libtorrent
     /// `dht_observer::outgoing_get_peers`). `sent_target` differs from
     /// `target` for privacy (obfuscated) lookups, where only the leading
