@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use cloudllm_dht::announce_flags::AnnounceFlags;
-use cloudllm_dht::bencode::decode;
+use cloudllm_dht::bencode::{decode, Entry};
 use cloudllm_dht::dht_state::DhtState;
 use cloudllm_dht::events::Event;
 use cloudllm_dht::rng::{Rng, TestRng};
@@ -217,4 +217,150 @@ fn test_sim_dht_bootstrap_first_packet_has_bs() {
             .dict_find_int_value(b"bs", -1),
         1
     );
+}
+
+/// Ports `TEST_CASE(dht_dual_stack_immutable_item)`: put an immutable item
+/// through the dual-stack session and get it back; exactly one `GetItemDone`
+/// arrives for the request.
+#[test]
+fn test_sim_dht_dual_stack_immutable_item() {
+    let mut sim = SimNet::new(3);
+    let (_, routers4) = build_network(&mut sim, 100, false, 31);
+    let (_, routers6) = build_network(&mut sim, 100, true, 32);
+    let (me, _) = session(&mut sim, &routers4, &routers6, 300);
+    sim.run_for(Duration::from_secs(2));
+    let now = sim.now();
+    let value = Entry::from("immutable item");
+    let target = sim.peers[me].dht.put_immutable_item(value.clone(), now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(2));
+    let puts: Vec<_> = sim.peers[me].dht.drain_events();
+    let acks = puts.iter().find_map(|e| match e {
+        Event::PutDone { responses, .. } => Some(*responses),
+        _ => None,
+    });
+    assert!(acks.is_some_and(|n| n > 0), "put acknowledged: {acks:?}");
+
+    let now = sim.now();
+    sim.peers[me].dht.get_immutable_item(target, now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(2));
+    let found: Vec<_> = sim.peers[me]
+        .dht
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::GetItemDone {
+                target: t, item, ..
+            } if t == target => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "one answer per request");
+    assert_eq!(found[0].value(), &value);
+}
+
+/// Ports `TEST_CASE(dht_dual_stack_mutable_item)`: the data callback runs
+/// once per stack (two), the item is stored, and an authoritative
+/// `GetItemDone` returns it.
+#[test]
+fn test_sim_dht_dual_stack_mutable_item() {
+    use cloudllm_dht::ed25519::create_keypair;
+    use cloudllm_dht::item::Item;
+    use cloudllm_dht::types::SequenceNumber;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let mut sim = SimNet::new(4);
+    let (_, routers4) = build_network(&mut sim, 100, false, 41);
+    let (_, routers6) = build_network(&mut sim, 100, true, 42);
+    let (me, _) = session(&mut sim, &routers4, &routers6, 400);
+    sim.run_for(Duration::from_secs(2));
+    let (pk, sk) = create_keypair(&[0u8; 32]);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c2 = Arc::clone(&count);
+    let now = sim.now();
+    sim.peers[me].dht.put_mutable_item(
+        pk,
+        b"",
+        Arc::new(move |item: &mut Item| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            *item = Item::signed(
+                Entry::from("mutable item"),
+                b"",
+                SequenceNumber(1),
+                &pk,
+                &sk,
+            )
+            .expect("a small item");
+        }),
+        now,
+    );
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(2));
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "one data callback per stack"
+    );
+    sim.peers[me].dht.drain_events();
+
+    let now = sim.now();
+    sim.peers[me].dht.get_mutable_item(pk, b"", now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(2));
+    let events = sim.peers[me].dht.drain_events();
+    let authoritative: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::GetItemDone {
+                item,
+                authoritative: true,
+                ..
+            } => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(authoritative.len(), 1);
+    assert_eq!(authoritative[0].pk(), &pk);
+    assert_eq!(authoritative[0].value(), &Entry::from("mutable item"));
+}
+
+/// `direct_request` and `sample_infohashes` through the tracker: the answers
+/// arrive as events, a request to a dead address times out with `None`.
+#[test]
+fn test_sim_dht_direct_request_and_sample() {
+    let mut sim = SimNet::new(5);
+    let (_, routers4) = build_network(&mut sim, 20, false, 51);
+    let (me, _) = session(&mut sim, &routers4, &[], 500);
+    sim.run_for(Duration::from_secs(2));
+    sim.peers[me].dht.drain_events();
+    let now = sim.now();
+    let mut ping = Entry::dict();
+    ping.set("q", "ping");
+    sim.peers[me]
+        .dht
+        .direct_request(routers4[0], ping.clone(), 7, now);
+    sim.peers[me]
+        .dht
+        .direct_request(ep("40.1.1.1", 1), ping, 8, now);
+    sim.peers[me]
+        .dht
+        .sample_infohashes(routers4[1], Sha1Hash([1; 20]), now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(20));
+    let events = sim.peers[me].dht.drain_events();
+    let direct = |token: u64| {
+        events.iter().find_map(|e| match e {
+            Event::DirectResponse {
+                token: t, reply, ..
+            } if *t == token => Some(reply.clone()),
+            _ => None,
+        })
+    };
+    assert!(matches!(direct(7), Some(Some(_))));
+    assert_eq!(direct(8), Some(None));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::SampleInfohashes { from, .. } if *from == routers4[1])));
 }

@@ -36,8 +36,9 @@
 //! * Every outgoing message carries a `v` client tag; libtorrent's is
 //!   `LT` plus its version, ours is [`CLIENT_VERSION`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::announce_flags::AnnounceFlags;
@@ -45,6 +46,7 @@ use crate::bencode::{decode_with_limits, Entry, NodeKind};
 use crate::dht_state::DhtState;
 use crate::dos_blocker::DosBlocker;
 use crate::events::Event;
+use crate::item::{immutable_item_target_id, Item};
 use crate::msg::Msg;
 use crate::net::Protocol;
 use crate::node::counters::NodeCounters;
@@ -58,6 +60,7 @@ use crate::settings::DhtSettings;
 use crate::storage::{DefaultStorage, DhtStorage};
 use crate::time::Time;
 use crate::transport::Transport;
+use crate::types::PublicKey;
 
 pub mod prefilter;
 pub mod quota;
@@ -229,6 +232,136 @@ impl Transport for TrackerTransport<'_> {
     }
 }
 
+/// Combines the per-node results of an operation into one answer, the way
+/// `dht_tracker`'s `get_immutable_item_ctx`, `get_mutable_item_ctx` and
+/// `put_item_ctx` do: an operation runs once on every node, each node
+/// reports through its own [`Event`], and the tracker reports once.
+///
+/// Operations are correlated by target, so two simultaneous operations of
+/// the same kind on the same target share one slot (the later replaces the
+/// earlier's bookkeeping).
+#[derive(Default)]
+struct Aggregator {
+    immutable_gets: HashMap<NodeId, ImmutableGet>,
+    mutable_gets: HashMap<NodeId, MutableGet>,
+    puts: HashMap<NodeId, PendingPut>,
+}
+
+struct ImmutableGet {
+    active: usize,
+    posted: bool,
+}
+
+struct MutableGet {
+    active: usize,
+    best: Item,
+}
+
+struct PendingPut {
+    active: usize,
+    responses: usize,
+}
+
+impl Aggregator {
+    /// Moves `scratch` to `out`, folding the BEP 44 events of registered
+    /// operations; every other event passes through.
+    fn absorb(&mut self, scratch: &mut Vec<Event>, out: &mut VecDeque<Event>) {
+        for ev in scratch.drain(..) {
+            match ev {
+                Event::GetItemDone {
+                    target,
+                    item,
+                    authoritative,
+                } => self.get_done(target, item, authoritative, out),
+                Event::PutDone {
+                    target,
+                    item,
+                    responses,
+                } => self.put_done(target, item, responses, out),
+                other => out.push_back(other),
+            }
+        }
+    }
+
+    fn get_done(
+        &mut self,
+        target: NodeId,
+        item: Item,
+        authoritative: bool,
+        out: &mut VecDeque<Event>,
+    ) {
+        if let Some(c) = self.immutable_gets.get_mut(&target) {
+            c.active = c.active.saturating_sub(1);
+            if !c.posted && (!item.is_empty() || c.active == 0) {
+                c.posted = true;
+                out.push_back(Event::GetItemDone {
+                    target,
+                    item,
+                    authoritative: true,
+                });
+            }
+            if c.active == 0 {
+                self.immutable_gets.remove(&target);
+            }
+        } else if let Some(c) = self.mutable_gets.get_mut(&target) {
+            if authoritative {
+                c.active = c.active.saturating_sub(1);
+            }
+            let last = authoritative && c.active == 0;
+            let better = (c.best.is_empty() && !item.is_empty()) || c.best.seq() < item.seq();
+            if better {
+                c.best = item;
+            }
+            // libtorrent passes the last node's item on the final callback;
+            // the best one found is what a caller wants there.
+            if better || last {
+                out.push_back(Event::GetItemDone {
+                    target,
+                    item: c.best.clone(),
+                    authoritative: last,
+                });
+            }
+            if last {
+                self.mutable_gets.remove(&target);
+            }
+        } else {
+            out.push_back(Event::GetItemDone {
+                target,
+                item,
+                authoritative,
+            });
+        }
+    }
+
+    fn put_done(
+        &mut self,
+        target: NodeId,
+        item: Item,
+        responses: usize,
+        out: &mut VecDeque<Event>,
+    ) {
+        let Some(c) = self.puts.get_mut(&target) else {
+            out.push_back(Event::PutDone {
+                target,
+                item,
+                responses,
+            });
+            return;
+        };
+        c.responses += responses;
+        c.active = c.active.saturating_sub(1);
+        if c.active == 0 {
+            let total = c.responses;
+            self.puts.remove(&target);
+            out.push_back(Event::PutDone {
+                target,
+                item,
+                responses: total,
+            });
+        }
+    }
+}
+
 /// An embedder-supplied predicate: `true` for addresses to ignore.
 pub type IpFilterFn = dyn Fn(IpAddr) -> bool + Send + Sync;
 
@@ -308,6 +441,7 @@ impl DhtBuilder {
             hook: None,
             counters: TrackerCounters::default(),
             next_socket: 0,
+            agg: Aggregator::default(),
         }
     }
 }
@@ -364,6 +498,7 @@ pub struct Dht {
     hook: Option<Box<RequestHookFn>>,
     counters: TrackerCounters,
     next_socket: u32,
+    agg: Aggregator,
 }
 
 impl Dht {
@@ -567,6 +702,7 @@ impl Dht {
             ip_filter,
             hook,
             counters,
+            agg,
             ..
         } = self;
         let mut node = nodes.get_mut(idx)?.node.take()?;
@@ -598,7 +734,7 @@ impl Dht {
             f(&mut node, &mut env)
         };
         nodes[idx].node = Some(node);
-        events.extend(scratch.drain(..));
+        agg.absorb(scratch, events);
         Some(result)
     }
 
@@ -831,6 +967,123 @@ impl Dht {
                 node.announce(env, info_hash, port, flags)
             });
         }
+    }
+
+    /// Looks an immutable item up on every node; one
+    /// [`Event::GetItemDone`] arrives when an item is found, or an empty
+    /// one when every node came back empty-handed (libtorrent
+    /// `dht_tracker::get_item(sha1_hash)`).
+    pub fn get_immutable_item(&mut self, target: NodeId, now: Time) {
+        let active = self.nodes.len();
+        self.agg.immutable_gets.insert(
+            target,
+            ImmutableGet {
+                active,
+                posted: false,
+            },
+        );
+        for idx in 0..active {
+            self.with_node(idx, now, |node, env| node.get_immutable(env, target));
+        }
+    }
+
+    /// Looks a mutable item up on every node: better versions arrive as
+    /// non-authoritative [`Event::GetItemDone`]s, then one authoritative
+    /// event carries the best version found (libtorrent
+    /// `dht_tracker::get_item(public_key, ..)`).
+    pub fn get_mutable_item(&mut self, pk: PublicKey, salt: &[u8], now: Time) {
+        let target = crate::item::item_target_id(salt, &pk);
+        let active = self.nodes.len();
+        self.agg.mutable_gets.insert(
+            target,
+            MutableGet {
+                active,
+                best: Item::new(),
+            },
+        );
+        for idx in 0..active {
+            self.with_node(idx, now, |node, env| node.get_mutable(env, pk, salt));
+        }
+    }
+
+    /// Stores an immutable item on the network and returns its target;
+    /// one [`Event::PutDone`] with the total number of acknowledging nodes
+    /// follows (libtorrent `dht_tracker::put_item(entry, ..)`).
+    pub fn put_immutable_item(&mut self, data: Entry, now: Time) -> NodeId {
+        let target = immutable_item_target_id(&data.encode());
+        let active = self.nodes.len();
+        self.agg.puts.insert(
+            target,
+            PendingPut {
+                active,
+                responses: 0,
+            },
+        );
+        for idx in 0..active {
+            let d = data.clone();
+            self.with_node(idx, now, |node, env| node.put_immutable(env, target, d));
+        }
+        target
+    }
+
+    /// Stores a mutable item. On every node `data_cb` is called once with
+    /// the authoritative item found (empty if none) and must leave the
+    /// item to store in it, signed for its key and salt; incrementing the
+    /// sequence number makes this a compare-and-swap. One
+    /// [`Event::PutDone`] with the total acknowledgements follows
+    /// (libtorrent `dht_tracker::put_item(public_key, ..)`).
+    pub fn put_mutable_item(
+        &mut self,
+        pk: PublicKey,
+        salt: &[u8],
+        data_cb: Arc<dyn Fn(&mut Item) + Send + Sync>,
+        now: Time,
+    ) {
+        let target = crate::item::item_target_id(salt, &pk);
+        let active = self.nodes.len();
+        self.agg.puts.insert(
+            target,
+            PendingPut {
+                active,
+                responses: 0,
+            },
+        );
+        for idx in 0..active {
+            let cb = Arc::clone(&data_cb);
+            self.with_node(idx, now, |node, env| {
+                node.put_mutable(env, pk, salt, Box::new(move |i| cb(i)));
+            });
+        }
+    }
+
+    /// Sends a BEP 51 `sample_infohashes` from the first node of `ep`'s
+    /// family; the answer is an [`Event::SampleInfohashes`] (libtorrent
+    /// `dht_tracker::sample_infohashes`).
+    pub fn sample_infohashes(&mut self, ep: SocketAddr, target: NodeId, now: Time) {
+        if let Some(idx) = self.node_index_for(ep) {
+            self.with_node(idx, now, |node, env| {
+                node.sample_infohashes(env, ep, target)
+            });
+        }
+    }
+
+    /// Sends an arbitrary request from the first node of `ep`'s family;
+    /// the reply (or `None` after a timeout) is an
+    /// [`Event::DirectResponse`] carrying `token` (libtorrent
+    /// `dht_tracker::direct_request`).
+    pub fn direct_request(&mut self, ep: SocketAddr, request: Entry, token: u64, now: Time) {
+        if let Some(idx) = self.node_index_for(ep) {
+            self.with_node(idx, now, |node, env| {
+                node.direct_request(env, ep, request, token);
+            });
+        }
+    }
+
+    fn node_index_for(&self, ep: SocketAddr) -> Option<usize> {
+        let family = Protocol::of(&ep.ip());
+        self.nodes
+            .iter()
+            .position(|s| s.node.as_ref().is_some_and(|n| n.protocol() == family))
     }
 
     // ------------------------------------------------------------------
