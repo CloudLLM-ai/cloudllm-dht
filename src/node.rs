@@ -56,9 +56,14 @@ use crate::settings::DhtSettings;
 use crate::storage::DhtStorage;
 use crate::time::Time;
 use crate::transport::Transport;
+use crate::traversal::direct_request::direct_request;
+use crate::traversal::get_item::{get_immutable, get_mutable};
 use crate::traversal::get_peers::{announce, get_peers};
+use crate::traversal::put_data::{put_immutable, put_mutable, DataCallback};
 use crate::traversal::refresh::{bootstrap, refresh};
+use crate::traversal::sample_infohashes::sample_infohashes;
 use crate::traversal::{LookupStatus, Traversals};
+use crate::types::PublicKey;
 
 pub mod counters;
 pub mod query;
@@ -535,6 +540,79 @@ impl Node {
     ) {
         self.with_ctx(env, |ctx, traversals| {
             let t = announce(ctx, info_hash, listen_port, flags);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Looks an immutable item up by `target` (SHA-1 of its bencoded
+    /// value); the result is an [`Event::GetItemDone`] (libtorrent
+    /// `node::get_item(sha1_hash)`).
+    pub fn get_immutable(&mut self, env: &mut NodeEnv<'_>, target: NodeId) {
+        self.with_ctx(env, |ctx, traversals| {
+            let t = get_immutable(ctx, target);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Looks a mutable item up by key and salt; better versions arrive as
+    /// non-authoritative [`Event::GetItemDone`]s and the final one as an
+    /// authoritative one (libtorrent `node::get_item(public_key, salt)`).
+    pub fn get_mutable(&mut self, env: &mut NodeEnv<'_>, pk: PublicKey, salt: &[u8]) {
+        self.with_ctx(env, |ctx, traversals| {
+            let t = get_mutable(ctx, pk, salt);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Stores an immutable item: a lookup for `target` followed by a `put`
+    /// to the closest nodes, ending in [`Event::PutDone`] (libtorrent
+    /// `node::put_item(sha1_hash, entry)`).
+    pub fn put_immutable(&mut self, env: &mut NodeEnv<'_>, target: NodeId, data: Entry) {
+        self.with_ctx(env, |ctx, traversals| {
+            let t = put_immutable(ctx, target, data);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Stores a mutable item: looks it up, lets `data_cb` produce the item
+    /// to store from what the network holds (sign it with `seq + 1` for a
+    /// compare-and-swap), then writes it (libtorrent
+    /// `node::put_item(public_key, salt, ..)`).
+    pub fn put_mutable(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        pk: PublicKey,
+        salt: &[u8],
+        data_cb: DataCallback,
+    ) {
+        self.with_ctx(env, |ctx, traversals| {
+            let t = put_mutable(ctx, pk, salt, data_cb);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Sends a BEP 51 `sample_infohashes` to `ep`; the answer is an
+    /// [`Event::SampleInfohashes`] (libtorrent `node::sample_infohashes`).
+    pub fn sample_infohashes(&mut self, env: &mut NodeEnv<'_>, ep: SocketAddr, target: NodeId) {
+        self.counters.sample_infohashes_out += 1;
+        self.with_ctx(env, |ctx, traversals| {
+            let t = sample_infohashes(ctx, ep, target);
+            traversals.spawn(ctx, t);
+        });
+    }
+
+    /// Sends an arbitrary request to `ep`; the answer, or `None` on
+    /// timeout, is an [`Event::DirectResponse`] carrying `token` (libtorrent
+    /// `node::direct_request`).
+    pub fn direct_request(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        ep: SocketAddr,
+        request: Entry,
+        token: u64,
+    ) {
+        self.with_ctx(env, |ctx, traversals| {
+            let t = direct_request(ctx, ep, request, token);
             traversals.spawn(ctx, t);
         });
     }
