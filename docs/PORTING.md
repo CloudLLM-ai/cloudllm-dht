@@ -116,6 +116,18 @@ pub fn replace_node_impl(e: &NodeEntry, b: &mut [NodeEntry], ips: &mut IpSet, bu
                          bucket_size_limit: usize, last_bucket: bool) -> AddNodeStatus;
 ```
 
+A libtorrent bug found by WP3: `dht_storage.cpp` (lines 279 and 629,
+`aux::random(candidates--) > to_pick`) draws from the inclusive range
+`0..=candidates`, so a peer or info-hash is picked with probability
+`(to_pick + 1) / (candidates + 1)` instead of `to_pick / candidates`, biasing
+`get_peers` and BEP 51 samples towards the front of the sorted lists. Fixed
+here (uniform draw, same guarantee of exactly `to_pick` picks; selection is
+local so interoperability is unaffected); regression tests
+`test_get_peers_pick_is_uniform` and `test_infohashes_sample_pick_is_uniform`.
+Not a bug but misleading: `dos_blocker.cpp` line 70 says a banned node is
+ignored "until it's silent for 5 minutes", while the ban is a fixed length
+from the packet that tripped it; kept, comment corrected in our rustdoc.
+
 A libtorrent bug found while porting: `routing_table::depth()` stores `-1` in its
 cached `m_depth` when called on an empty table and then returns it forever
 (the early return for negative values never recomputes), even after nodes
