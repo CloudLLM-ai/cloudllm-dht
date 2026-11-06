@@ -1,5 +1,23 @@
 UNRELEASED
 
+  - feat(foundation): the shared modules every work package builds on:
+    Sha1Hash/NodeId with the XOR metric and distance_exp; BEP 42 ID
+    generation and verification (crc32c; the five BEP 42 reference vectors
+    pass); per-owner secret IDs; compact IPv4/IPv6 endpoint and node
+    encodings; DhtSettings with libtorrent's defaults and its persisted
+    subset; the message model (Query, MessageType, Want, ErrorCode) and the
+    declarative verify_message with libtorrent's exact error strings; the
+    injectable Time/Clock/Rng/Transport seam of the sans-IO core; and a
+    test harness porting test_dht.cpp's mock_socket, msg_args and helpers.
+    A message_parse fuzz target covers decode, verify tables and compact
+    parsing.
+
+  - docs: ARCHITECTURE.md (sans-IO design, storage trait, ed25519 key
+    mapping, API sketch) and PORTING.md (every libtorrent file and TEST_CASE
+    mapped to a module and one of four work packages, with the interfaces
+    between packages). Placeholder modules for every package are declared
+    in lib.rs so packages never conflict there.
+
   - feat(bencode): bencode decoder and encoder ported from libtorrent
     (bdecode.cpp, entry.cpp). Same depth/token/buffer limits, same error
     codes and error positions, soft errors (unsorted or duplicate keys,
