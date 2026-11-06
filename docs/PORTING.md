@@ -292,13 +292,13 @@ WP4's.
 | `include/libtorrent/kademlia/observer.hpp` | `src/observer.rs` | WP2 | done | request record in the rpc manager arena |
 | `include/libtorrent/kademlia/rpc_manager.hpp + src/kademlia/rpc_manager.cpp` | `src/rpc_manager.rs` | WP2 | done | transaction table, timeouts, `unreachable` |
 | `include/libtorrent/kademlia/traversal_algorithm.hpp + .cpp` | `src/traversal/algorithm.rs` | WP2 | done |  |
-| `include/libtorrent/kademlia/find_data.hpp + .cpp` | `src/traversal/find_data.rs` | WP2 | todo |  |
-| `include/libtorrent/kademlia/get_peers.hpp + .cpp` | `src/traversal/get_peers.rs` | WP2 | todo | incl. BEP 33 scrape reply parsing |
+| `include/libtorrent/kademlia/find_data.hpp + .cpp` | `src/traversal/find_data.rs` | WP2 | done |  |
+| `include/libtorrent/kademlia/get_peers.hpp + .cpp` | `src/traversal/get_peers.rs` | WP2 | done | incl. BEP 33 scrape reply parsing |
 | `include/libtorrent/kademlia/get_item.hpp + .cpp` | `src/traversal/get_item.rs` | WP2 | todo | BEP 44 get |
 | `include/libtorrent/kademlia/put_data.hpp + .cpp` | `src/traversal/put_data.rs` | WP2 | todo | BEP 44 put, announce_peer |
-| `include/libtorrent/kademlia/sample_infohashes.hpp + .cpp` | `src/traversal/sample_infohashes.rs` | WP2 | todo | BEP 51 |
-| `include/libtorrent/kademlia/direct_request.hpp` | `src/traversal/direct_request.rs` | WP2 | todo |  |
-| `include/libtorrent/kademlia/refresh.hpp + src/kademlia/refresh.cpp (refresh, bootstrap)` | `src/traversal/refresh.rs` | WP2 | todo | moved from WP1: a traversal subclass |
+| `include/libtorrent/kademlia/sample_infohashes.hpp + .cpp` | `src/traversal/sample_infohashes.rs` | WP2 | done | BEP 51 |
+| `include/libtorrent/kademlia/direct_request.hpp` | `src/traversal/direct_request.rs` | WP2 | done |  |
+| `include/libtorrent/kademlia/refresh.hpp + src/kademlia/refresh.cpp (refresh, bootstrap)` | `src/traversal/refresh.rs` | WP2 | done | moved from WP1: a traversal subclass |
 | `include/libtorrent/kademlia/dht_storage.hpp + src/kademlia/dht_storage.cpp` | `src/storage.rs` | WP3 | done | `DhtStorage` trait + `DefaultStorage`, BEP 33 bloom filters, token-less |
 | `include/libtorrent/bloom_filter.hpp (not in kademlia/)` | `src/bloom_filter.rs` | WP3 | done | BEP 33 scrape |
 | `include/libtorrent/kademlia/item.hpp + src/kademlia/item.cpp` | `src/item.rs` | WP3 | done | BEP 44 `Item`, signing payload, `verify_mutable_item` |
@@ -328,14 +328,14 @@ WP4's.
 | `put_v6` | `tests/dht_node.rs` | WP4 |
 | `routing_table_v4` | `tests/routing_table.rs` | done |
 | `routing_table_v6` | `tests/routing_table.rs` | done |
-| `bootstrap_v4` | `tests/traversal.rs` | WP2 |
-| `bootstrap_v6` | `tests/traversal.rs` | WP2 |
-| `bootstrap_want_v4` | `tests/traversal.rs` | WP2 |
-| `bootstrap_want_v6` | `tests/traversal.rs` | WP2 |
-| `short_nodes_v4` | `tests/traversal.rs` | WP2 |
-| `short_nodes_v6` | `tests/traversal.rs` | WP2 |
-| `get_peers_v4` | `tests/traversal.rs` | WP2 |
-| `get_peers_v6` | `tests/traversal.rs` | WP2 |
+| `bootstrap_v4` | `tests/traversal.rs` | done |
+| `bootstrap_v6` | `tests/traversal.rs` | done |
+| `bootstrap_want_v4` | `tests/traversal.rs` | done |
+| `bootstrap_want_v6` | `tests/traversal.rs` | done |
+| `short_nodes_v4` | `tests/traversal.rs` | done |
+| `short_nodes_v6` | `tests/traversal.rs` | done |
+| `get_peers_v4` | `tests/traversal.rs` | done |
+| `get_peers_v6` | `tests/traversal.rs` | done |
 | `mutable_get_v4` | `tests/traversal.rs` | WP2 |
 | `mutable_get_salt_v4` | `tests/traversal.rs` | WP2 |
 | `mutable_get_v6` | `tests/traversal.rs` | WP2 |
@@ -358,10 +358,10 @@ WP4's.
 | `routing_table_for_each` | `tests/routing_table.rs` | done |
 | `node_set_id` | `tests/dht_node.rs` | WP4 |
 | `read_only_node` | `tests/dht_node.rs` | WP4 |
-| `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | WP2 done |
-| `invalid_error_msg` | `tests/rpc_manager.rs` | WP2 done |
-| `unsorted_traversal_results` | `tests/traversal.rs` | WP2 done |
-| `rpc_invalid_error_msg` | `tests/rpc_manager.rs` | WP2 done |
+| `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | done |
+| `invalid_error_msg` | `tests/rpc_manager.rs` | done |
+| `unsorted_traversal_results` | `tests/traversal.rs` | done |
+| `rpc_invalid_error_msg` | `tests/rpc_manager.rs` | done |
 | `node_id_bucket_distribution` | `tests/node_id.rs` | done |
 | `node_id_min_distance_exp` | `tests/node_id.rs` | done |
 | `dht_verify_node_address` | `tests/routing_table.rs` | done |
@@ -372,7 +372,7 @@ WP4's.
 | `distance_exp` | `tests/node_id.rs` | done |
 | `compare_ip_cidr` | `tests/routing_table.rs` | done |
 | `dht_state` | `tests/dht_state.rs` | WP3 done |
-| `sample_infohashes` | `tests/traversal.rs` | WP2 |
+| `sample_infohashes` | `tests/traversal.rs` | done |
 | `node_entry_comparison` | `tests/node_entry.rs` | done |
 | `mostly_verified_nodes` | `tests/routing_table.rs` | done |
 | `classify_prefix` | `tests/routing_table.rs` | done |
@@ -410,7 +410,7 @@ WP4's.
 
 | TEST_CASE | Rust test file | WP / status |
 |---|---|---|
-| `direct_dht_request` | `tests/traversal.rs` | WP2 |
+| `direct_dht_request` | `tests/traversal.rs` | done |
 
 ## Test cases: `test/test_dos_blocker.cpp`
 
