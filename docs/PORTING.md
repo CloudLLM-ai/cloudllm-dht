@@ -141,7 +141,7 @@ first sketch did not survive the borrow checker, see "why" below)
 pub struct NodeCtx<'a> {
     pub now: Time, pub id: NodeId, pub protocol: Protocol,
     pub settings: &'a DhtSettings,
-    pub table: &'a mut dyn TableOps,                // WP1's RoutingTable implements it (impl lives in ctx.rs)
+    pub table: &'a mut dyn TableOps,                // WP1's RoutingTable implements it (impl lives in routing_table.rs)
     pub rpc: &'a mut RpcManager,                    // transaction table + observer arena
     pub transport: &'a mut dyn Transport,
     pub rng: &'a mut dyn Rng,
