@@ -196,33 +196,64 @@ an arena inside `RpcManager` (reference counted, like libtorrent's
 `shared_ptr<observer>`); a traversal is dropped when it is done and its last
 observer is freed.
 
-**WP3 -> WP2, WP4: `DhtStorage`, `Item`, `DhtState`, `AnnounceFlags`**
+**WP3 -> WP2, WP4: `DhtStorage`, `Item`, `DhtState`, `AnnounceFlags`** (landed; the code is the contract, summarized here)
 
 ```rust
-bitflags-free newtype: pub struct AnnounceFlags(u8) { SEED, IMPLIED_PORT, SSL_TORRENT }   // announce_flags.hpp
-pub trait DhtStorage {                                           // dht_storage_interface
+// announce_flags.rs: no bitflags crate
+pub struct AnnounceFlags(u8)  // consts SEED, IMPLIED_PORT, SSL_TORRENT, EMPTY; |, &, contains(), bits()
+
+// storage.rs
+pub trait DhtStorage: Send {                                    // dht_storage_interface
     fn update_node_ids(&mut self, ids: &[NodeId]);
-    /// Fills `reply` ("values"/"values6"/"BFsd"/"BFpe" for scrape) -> any peers found.
-    fn get_peers(&self, info_hash: &Sha1Hash, noseed: bool, scrape: bool, requester: IpAddr, reply: &mut Entry) -> bool;
+    fn get_peers(&self, info_hash: &Sha1Hash, noseed: bool, scrape: bool, requester: IpAddr,
+                 reply: &mut Entry) -> bool;                    // true = "full": token only for known requesters
     fn announce_peer(&mut self, info_hash: &Sha1Hash, endpoint: SocketAddr, name: &str, seed: bool);
     fn get_immutable_item(&self, target: &Sha1Hash, item: &mut Entry) -> bool;
     fn put_immutable_item(&mut self, target: &Sha1Hash, buf: &[u8], addr: IpAddr);
     fn get_mutable_item_seq(&self, target: &Sha1Hash) -> Option<SequenceNumber>;
-    fn get_mutable_item(&self, target: &Sha1Hash, seq: SequenceNumber, force_fill: bool, item: &mut Entry) -> bool;
+    fn get_mutable_item(&self, target: &Sha1Hash, seq: SequenceNumber, force_fill: bool,
+                        item: &mut Entry) -> bool;
     fn put_mutable_item(&mut self, target: &Sha1Hash, buf: &[u8], sig: &Signature, seq: SequenceNumber,
                         pk: &PublicKey, salt: &[u8], addr: IpAddr);
     fn get_infohashes_sample(&mut self, item: &mut Entry) -> usize;
-    fn tick(&mut self, now: Time);                              // expiry
-    fn counters(&self) -> StorageCounters;
+    fn tick(&mut self, now: Time);
+    fn counters(&self) -> StorageCounters;                      // { torrents, peers, immutable_data, mutable_data }
+    fn set_settings(&mut self, settings: &DhtSettings) {}       // provided; libtorrent holds a live reference instead
 }
-pub struct DefaultStorage { .. }  impl DefaultStorage { pub fn new(settings: &DhtSettings, rng: ..) -> Self }
-pub struct Item { .. }            // item.hpp: immutable/mutable, value, salt, pk, sig, seq
-pub fn item_target_id(salt: &[u8], pk: &PublicKey) -> Sha1Hash;           // item_target_id
+pub struct DefaultStorage;
+impl DefaultStorage {
+    pub fn new(settings: &DhtSettings, clock: Box<dyn Clock + Send + Sync>, rng: Box<dyn Rng + Send>) -> Self;
+    pub fn with_system(settings: &DhtSettings) -> Self;         // SystemClock + SystemRng
+    pub fn mutable_item_salt(&self, target: &Sha1Hash) -> Option<&[u8]>;
+}
+```
+
+* The storage owns its `Clock` (announce/put timestamps) and `Rng` (peer and sample selection),
+  because `get_peers` is `&self` and `announce_peer`/`put_*` take no `now`; `tick(now)` takes it
+  explicitly. Use a clone of the same `ManualClock` in tests. **The node must call
+  `set_settings` whenever its `DhtSettings` change** (libtorrent's storage reads them live).
+* `get_peers` on an unknown torrent leaves `reply` untouched (libtorrent's tests only observe empty
+  entries because C++ `operator[]` creates them). `name` is `&str`, truncated to 100 bytes at a char boundary.
+
+```rust
+// item.rs
+pub fn item_target_id(salt: &[u8], pk: &PublicKey) -> Sha1Hash;      // mutable
+pub fn immutable_item_target_id(v: &[u8]) -> Sha1Hash;               // item_target_id(span)
+pub fn signing_payload(v: &[u8], salt: &[u8], seq: SequenceNumber) -> Vec<u8>;
 pub fn verify_mutable_item(v: &[u8], salt: &[u8], seq: SequenceNumber, pk: &PublicKey, sig: &Signature) -> bool;
 pub fn sign_mutable_item(v: &[u8], salt: &[u8], seq: SequenceNumber, pk: &PublicKey, sk: &SecretKey) -> Signature;
-pub struct DosBlocker { .. }   impl { pub fn new() -> Self; pub fn incoming(&mut self, addr: IpAddr, now: Time, ban: bool..) -> bool; }
+pub struct Item;  // new/for_key/immutable/immutable_from_node/signed/from_signed_entry/from_signed_node,
+                  // value()/pk()/sig()/seq()/salt()/is_mutable()/is_empty()/target()
+// ed25519.rs: create_seed(&mut dyn Rng), create_keypair(&Seed), sign, verify, add_scalar_public/_secret, key_exchange
+// dos_blocker.rs
+impl DosBlocker { pub fn new() -> Self; pub fn incoming(&mut self, addr: IpAddr, now: Time) -> bool;
+    pub fn incoming_decision(..) -> DosDecision /* Allow | Block | Ban{count, window_ms} */;
+    pub fn set_rate_limit(&mut self, i32); pub fn set_block_timer(&mut self, i32); }
+// dht_state.rs
 pub struct DhtState { pub nids: Vec<(IpAddr, NodeId)>, pub nodes: Vec<SocketAddr>, pub nodes6: Vec<SocketAddr> }
+impl DhtState { pub fn load(&[u8]) -> Result<Self, DecodeError>; pub fn encode(&self) -> Vec<u8>; pub fn clear(&mut self) }
 pub fn read_dht_state(e: &Node<'_>) -> DhtState;  pub fn save_dht_state(s: &DhtState) -> Entry;
+// bloom_filter.rs: BloomFilter<const N: usize>, hash_address(IpAddr) -> Sha1Hash, count_zero_bits
 ```
 
 **WP4 owns `Event` and the public `Dht` API** (`events.rs`, `tracker.rs`).
@@ -268,13 +299,13 @@ WP4's.
 | `include/libtorrent/kademlia/sample_infohashes.hpp + .cpp` | `src/traversal/sample_infohashes.rs` | WP2 | todo | BEP 51 |
 | `include/libtorrent/kademlia/direct_request.hpp` | `src/traversal/direct_request.rs` | WP2 | todo |  |
 | `include/libtorrent/kademlia/refresh.hpp + src/kademlia/refresh.cpp (refresh, bootstrap)` | `src/traversal/refresh.rs` | WP2 | todo | moved from WP1: a traversal subclass |
-| `include/libtorrent/kademlia/dht_storage.hpp + src/kademlia/dht_storage.cpp` | `src/storage.rs` | WP3 | todo | `DhtStorage` trait + `DefaultStorage`, BEP 33 bloom filters, token-less |
-| `include/libtorrent/bloom_filter.hpp (not in kademlia/)` | `src/bloom_filter.rs` | WP3 | todo | BEP 33 scrape |
-| `include/libtorrent/kademlia/item.hpp + src/kademlia/item.cpp` | `src/item.rs` | WP3 | todo | BEP 44 `Item`, signing payload, `verify_mutable_item` |
-| `include/libtorrent/kademlia/ed25519.hpp + src/kademlia/ed25519.cpp` | `src/ed25519.rs` | WP3 | todo | thin layer over ed25519-dalek, see ARCHITECTURE.md section 3 |
-| `include/libtorrent/kademlia/dos_blocker.hpp + src/kademlia/dos_blocker.cpp` | `src/dos_blocker.rs` | WP3 | todo |  |
-| `include/libtorrent/kademlia/dht_state.hpp + src/kademlia/dht_state.cpp` | `src/dht_state.rs` | WP3 | todo | `DhtState`, `read_dht_state`, `save_dht_state`, `extract_node_ids` |
-| `include/libtorrent/kademlia/announce_flags.hpp` | `src/announce_flags.rs` | WP3 | todo | tiny; shared with WP2/WP4 so it lands first |
+| `include/libtorrent/kademlia/dht_storage.hpp + src/kademlia/dht_storage.cpp` | `src/storage.rs` | WP3 | done | `DhtStorage` trait + `DefaultStorage`, BEP 33 bloom filters, token-less |
+| `include/libtorrent/bloom_filter.hpp (not in kademlia/)` | `src/bloom_filter.rs` | WP3 | done | BEP 33 scrape |
+| `include/libtorrent/kademlia/item.hpp + src/kademlia/item.cpp` | `src/item.rs` | WP3 | done | BEP 44 `Item`, signing payload, `verify_mutable_item` |
+| `include/libtorrent/kademlia/ed25519.hpp + src/kademlia/ed25519.cpp` | `src/ed25519.rs` | WP3 | done | on curve25519-dalek (ed25519-dalek is a dev-dependency oracle), see ARCHITECTURE.md section 3 |
+| `include/libtorrent/kademlia/dos_blocker.hpp + src/kademlia/dos_blocker.cpp` | `src/dos_blocker.rs` | WP3 | done |  |
+| `include/libtorrent/kademlia/dht_state.hpp + src/kademlia/dht_state.cpp` | `src/dht_state.rs` | WP3 | done | `DhtState`, `read_dht_state`, `save_dht_state`, `extract_node_ids` |
+| `include/libtorrent/kademlia/announce_flags.hpp` | `src/announce_flags.rs` | WP3 | done | tiny; shared with WP2/WP4 so it lands first |
 | `include/libtorrent/kademlia/node.hpp + src/kademlia/node.cpp` | `src/node.rs` | WP4 | todo | query handlers, token generation, `incoming`, `tick` |
 | `include/libtorrent/kademlia/dht_tracker.hpp + src/kademlia/dht_tracker.cpp` | `src/tracker.rs` | WP4 | todo | multi-node (v4/v6) owner, timers, rate limiter |
 | `include/libtorrent/kademlia/dht_observer.hpp` | `src/events.rs` | WP4 | todo | alerts as an `Event` stream |
@@ -292,7 +323,7 @@ WP4's.
 | `scrape_v6` | `tests/dht_node.rs` | WP4 |
 | `id_enforcement_v4` | `tests/dht_node.rs` | WP4 |
 | `id_enforcement_v6` | `tests/dht_node.rs` | WP4 |
-| `bloom_filter` | `tests/bloom_filter.rs` | WP3 |
+| `bloom_filter` | `tests/bloom_filter.rs` | WP3 done |
 | `put_v4` | `tests/dht_node.rs` | WP4 |
 | `put_v6` | `tests/dht_node.rs` | WP4 |
 | `routing_table_v4` | `tests/routing_table.rs` | done |
@@ -315,10 +346,10 @@ WP4's.
 | `traversal_done` | `tests/traversal.rs` | WP2 |
 | `dht_dual_stack` | `tests/dht_node.rs` | WP4 |
 | `multi_home` | `tests/dht_node.rs` | WP4 |
-| `signing_test1` | `tests/item.rs` | WP3 |
-| `signing_test2` | `tests/item.rs` | WP3 |
-| `signing_test3` | `tests/item.rs` | WP3 |
-| `signing_oversized_salt` | `tests/item.rs` | WP3 |
+| `signing_test1` | `tests/item.rs` | WP3 done |
+| `signing_test2` | `tests/item.rs` | WP3 done |
+| `signing_test3` | `tests/item.rs` | WP3 done |
+| `signing_oversized_salt` | `tests/item.rs` | WP3 done |
 | `verify_message` | `tests/msg.rs` | done |
 | `routing_table_uniform` | `tests/routing_table.rs` | done |
 | `routing_table_balance` | `tests/routing_table.rs` | done |
@@ -340,7 +371,7 @@ WP4's.
 | `generate_prefix_mask` | `tests/node_id.rs` | done |
 | `distance_exp` | `tests/node_id.rs` | done |
 | `compare_ip_cidr` | `tests/routing_table.rs` | done |
-| `dht_state` | `tests/dht_state.rs` | WP3 |
+| `dht_state` | `tests/dht_state.rs` | WP3 done |
 | `sample_infohashes` | `tests/traversal.rs` | WP2 |
 | `node_entry_comparison` | `tests/node_entry.rs` | done |
 | `mostly_verified_nodes` | `tests/routing_table.rs` | done |
@@ -357,22 +388,22 @@ WP4's.
 
 | TEST_CASE | Rust test file | WP / status |
 |---|---|---|
-| `announce_peer` | `tests/storage.rs` | WP3 |
-| `dual_stack` | `tests/storage.rs` | WP3 |
-| `put_items` | `tests/storage.rs` | WP3 |
-| `counters` | `tests/storage.rs` | WP3 |
-| `set_custom` | `tests/storage.rs` | WP3 |
-| `default_set_custom` | `tests/storage.rs` | WP3 |
-| `peer_limit` | `tests/storage.rs` | WP3 |
-| `peer_prefix_limit` | `tests/storage.rs` | WP3 |
-| `peer_prefix_limit_full` | `tests/storage.rs` | WP3 |
-| `torrent_limit` | `tests/storage.rs` | WP3 |
-| `immutable_item_limit` | `tests/storage.rs` | WP3 |
-| `mutable_item_limit` | `tests/storage.rs` | WP3 |
-| `get_peers_dist` | `tests/storage.rs` | WP3 |
-| `update_node_ids` | `tests/storage.rs` | WP3 |
-| `infohashes_sample` | `tests/storage.rs` | WP3 |
-| `infohashes_sample_dist` | `tests/storage.rs` | WP3 |
+| `announce_peer` | `tests/storage.rs` | WP3 done |
+| `dual_stack` | `tests/storage.rs` | WP3 done |
+| `put_items` | `tests/storage.rs` | WP3 done |
+| `counters` | `tests/storage.rs` | WP3 done |
+| `set_custom` | `tests/storage.rs` | WP3 done |
+| `default_set_custom` | `tests/storage.rs` | WP3 done |
+| `peer_limit` | `tests/storage.rs` | WP3 done |
+| `peer_prefix_limit` | `tests/storage.rs` | WP3 done |
+| `peer_prefix_limit_full` | `tests/storage.rs` | WP3 done |
+| `torrent_limit` | `tests/storage.rs` | WP3 done |
+| `immutable_item_limit` | `tests/storage.rs` | WP3 done |
+| `mutable_item_limit` | `tests/storage.rs` | WP3 done |
+| `get_peers_dist` | `tests/storage.rs` | WP3 done |
+| `update_node_ids` | `tests/storage.rs` | WP3 done |
+| `infohashes_sample` | `tests/storage.rs` | WP3 done |
+| `infohashes_sample_dist` | `tests/storage.rs` | WP3 done |
 | `dummy` | `-` | n/a |
 
 ## Test cases: `test/test_direct_dht.cpp`
@@ -385,16 +416,16 @@ WP4's.
 
 | TEST_CASE | Rust test file | WP / status |
 |---|---|---|
-| `dos_blocker` | `tests/dos_blocker.rs` | WP3 |
+| `dos_blocker` | `tests/dos_blocker.rs` | WP3 done |
 
 ## Test cases: `test/test_ed25519.cpp`
 
 | TEST_CASE | Rust test file | WP / status |
 |---|---|---|
-| `ed25519_test_vec1` | `tests/ed25519.rs` | WP3 |
-| `create_seed` | `tests/ed25519.rs` | WP3 |
-| `add_scalar` | `tests/ed25519.rs` | WP3 |
-| `key_exchange` | `tests/ed25519.rs` | WP3 |
+| `ed25519_test_vec1` | `tests/ed25519.rs` | WP3 done |
+| `create_seed` | `tests/ed25519.rs` | WP3 done |
+| `add_scalar` | `tests/ed25519.rs` | WP3 done |
+| `key_exchange` | `tests/ed25519.rs` | WP3 done |
 | `empty` | `-` | n/a |
 
 ## Test cases: `test/test_bdecode.cpp`
@@ -497,8 +528,8 @@ libtorrent drives these through `libsimulator`. Here they are deterministic mult
 | `simulation/test_dht_rate_limit.cpp` | `dht_rate_limit` | `tests/sim_dht.rs` | WP4 |
 | `simulation/test_dht_rate_limit.cpp` | `dht_delete_socket` | `tests/sim_dht.rs` | WP4 |
 | `simulation/test_dht_bootstrap.cpp` | `dht_bootstrap` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht_storage.cpp` | `dht_storage_counters` | `tests/storage.rs` | WP3 |
-| `simulation/test_dht_storage.cpp` | `dht_storage_infohashes_sample` | `tests/storage.rs` | WP3 |
+| `simulation/test_dht_storage.cpp` | `dht_storage_counters` | `tests/storage.rs` | WP3 done |
+| `simulation/test_dht_storage.cpp` | `dht_storage_infohashes_sample` | `tests/storage.rs` | WP3 done |
 
 ## Fuzzers (`fuzzers/src/`)
 

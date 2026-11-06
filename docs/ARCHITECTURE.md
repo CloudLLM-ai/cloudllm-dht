@@ -66,7 +66,7 @@ is the interface between WP3 (owner) and WP2/WP4 (users); see PORTING.md.
 
 | Use                     | Crate                 | Notes |
 |-------------------------|-----------------------|-------|
-| BEP 44 signatures       | `ed25519-dalek` 2.x   | `default-features = false`, `hazmat` for the expanded key (below) |
+| BEP 44 signatures       | `curve25519-dalek` 4.x + `sha2` | the algorithms of libtorrent's ref10 code on dalek's group/scalar types; `ed25519-dalek` 2.x is a dev-dependency used as a differential oracle (below) |
 | SHA-1 (IDs, tokens, targets) | `sha1` 0.10       | libtorrent's `hasher` |
 | BEP 42 CRC32C           | `crc32c` 0.6          | hardware-accelerated; matches the BEP 42 vectors (tested) |
 | Randomness              | `getrandom` 0.3       | only inside `SystemRng` |
@@ -91,6 +91,17 @@ verification is the ordinary `VerifyingKey::verify`. So:
   (non-strict) algorithm. WP3 must check that `verify` (not `verify_strict`)
   accepts everything libtorrent accepts, and add a regression test for any
   divergence found against the BEP 44 test vectors.
+
+  **Outcome (WP3).** Both checks found divergences, so `src/ed25519.rs`
+  does not use `ed25519-dalek` in production code: `ExpandedSecretKey::from_bytes`
+  re-clamps the scalar (breaking keys from `add_scalar`, whose scalar is
+  `a + n mod l`, unclamped); `raw_sign` needs a decodable `VerifyingKey`
+  where libtorrent signs with any 32 bytes; and dalek's `verify` rejects
+  `S >= l` where libtorrent only requires `sig[63] & 224 == 0` and therefore
+  accepts the malleated `S + l` (regression test
+  `test_verify_accepts_s_plus_l_like_libtorrent`). The module implements
+  create_keypair/sign/verify/add_scalar/key_exchange on `curve25519-dalek`
+  and `tests/ed25519.rs` cross-checks them against `ed25519-dalek`.
 
 ## 4. Message handling
 
