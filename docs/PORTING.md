@@ -194,6 +194,8 @@ impl Traversals {
     pub fn tick(&mut self, ctx: &mut NodeCtx<'_>) -> Duration;      // rpc timeouts; delay to next tick
     pub fn unreachable(&mut self, ctx: &mut NodeCtx<'_>, ep: SocketAddr);
     pub fn status(&self, ctx: &NodeCtx<'_>) -> Vec<LookupStatus>;
+    /// ~rpc_manager: abort every outstanding request, send nothing more, ignore responses.
+    pub fn shutdown(&mut self, ctx: &mut NodeCtx<'_>);
 }
 // Constructors Node (WP4) calls (each returns a Box<dyn Traversal> for `Traversals::spawn`):
 //   bootstrap, get_peers/announce, get_item_*, put_item_*, sample_infohashes, direct_request  (module docs list exact signatures)

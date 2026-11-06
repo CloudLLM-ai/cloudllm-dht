@@ -69,6 +69,7 @@ pub struct RpcManager {
     transactions: BTreeMap<(u16, u64), ObserverId>,
     next_sequence: u64,
     next_traversal: u64,
+    shutting_down: bool,
 }
 
 /// What an incoming response or error turned out to be
@@ -128,6 +129,7 @@ impl RpcManager {
             transactions: BTreeMap::new(),
             next_sequence: 0,
             next_traversal: 1,
+            shutting_down: false,
         }
     }
 
@@ -147,6 +149,27 @@ impl RpcManager {
     /// dictionary (libtorrent `add_our_id`).
     pub fn add_our_id(&self, args: &mut Entry) {
         args.set("id", self.our_id.0.to_vec());
+    }
+
+    /// Starts shutting down (libtorrent `m_destructing`): from now on
+    /// requests are not sent and responses are ignored.
+    pub fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+    }
+
+    /// `true` after [`RpcManager::begin_shutdown`].
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    /// Empties the transaction table and returns its observers; their
+    /// transaction references pass to the caller (used by
+    /// [`Traversals::shutdown`](crate::traversal::Traversals::shutdown)).
+    pub fn take_all_transactions(&mut self) -> Vec<ObserverId> {
+        std::mem::take(&mut self.transactions)
+            .into_values()
+            .collect()
     }
 
     /// Number of live observers (libtorrent `num_allocated_observers`).
@@ -228,6 +251,9 @@ impl NodeCtx<'_> {
     /// Panics if `e` is defined but not a dictionary, or if `obs` is not a
     /// live observer; both are programming errors in the caller.
     pub fn invoke(&mut self, mut e: Entry, target: SocketAddr, obs: ObserverId) -> bool {
+        if self.rpc.shutting_down {
+            return false;
+        }
         e.set("y", "q");
         let native = self.native_address(target.ip());
         let want = self.protocol.want_key();
@@ -292,6 +318,9 @@ impl NodeCtx<'_> {
     /// `node_seen`). See [`Incoming`] for what the caller does with the
     /// result.
     pub fn rpc_incoming(&mut self, from: SocketAddr, msg: &Node<'_>) -> Incoming {
+        if self.rpc.shutting_down {
+            return Incoming::Ignored;
+        }
         let t = msg.dict_find_string_value(b"t", b"");
         if t.is_empty() {
             return Incoming::Ignored;

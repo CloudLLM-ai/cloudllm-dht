@@ -569,6 +569,19 @@ pub fn observer_timeout<T: Traversal + ?Sized>(t: &mut T, ctx: &mut NodeCtx<'_>,
     failed(t, ctx, oid, false);
 }
 
+/// `observer::abort()`: the node is shutting down. Marks the request done,
+/// stops its lookup from issuing more requests and counts the request as
+/// failed. Does nothing if it is already done.
+pub fn observer_abort<T: Traversal + ?Sized>(t: &mut T, ctx: &mut NodeCtx<'_>, oid: ObserverId) {
+    let o = obs_mut(ctx, oid);
+    if o.flags.contains(ObserverFlags::DONE) {
+        return;
+    }
+    o.flags |= ObserverFlags::DONE;
+    t.algo_mut().abort();
+    failed(t, ctx, oid, false);
+}
+
 /// `observer::short_timeout()`: no answer after the short timeout. Does
 /// nothing if one was already reported.
 pub fn observer_short_timeout<T: Traversal + ?Sized>(

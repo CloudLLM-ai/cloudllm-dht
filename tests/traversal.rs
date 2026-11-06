@@ -1383,3 +1383,50 @@ fn test_obfuscate_reveals_exactly_shared_prefix_plus_three_bits() {
         );
     }
 }
+
+/// Shutdown aborts every outstanding request: the table hears of each
+/// failure, nothing new is sent (not even the announce a finished lookup
+/// would send), late responses are ignored, and nothing is left behind.
+/// Ports the abort loop of `~rpc_manager`.
+#[test]
+fn test_shutdown_aborts_outstanding_requests() {
+    let (mut w, nodes) = lookup_world(3);
+    w.settings.search_branching = 2;
+    w.run(|ctx, trs| {
+        let t = announce(ctx, node_id(0), 6881, AnnounceFlags::EMPTY);
+        trs.spawn(ctx, t);
+    });
+    // a detached ping too
+    w.run(|ctx, _| {
+        ctx.invoke_detached(
+            cloudllm_dht::observer::ObserverKind::Ping,
+            Sha1Hash([0x44; 20]),
+            ep("9.9.9.9", 9),
+            Entry::dict(),
+        );
+    });
+    let first = w.sock.sent[0].1.clone();
+    let sent_before = w.sock.sent.len();
+    w.run(|ctx, trs| trs.shutdown(ctx));
+    assert_eq!(
+        w.sock.sent.len(),
+        sent_before,
+        "nothing is sent while shutting down"
+    );
+    assert_eq!(
+        w.table.failed.len(),
+        3,
+        "two lookup requests and the ping failed"
+    );
+    assert!(w.traversals.is_empty());
+    assert_eq!(w.rpc.num_transactions(), 0);
+    assert_eq!(w.rpc.num_allocated_observers(), 0);
+    // a response arriving now is ignored
+    w.respond(
+        &first,
+        nodes[0].1,
+        &MsgArgs::new().nid(&nodes[0].0).token(b"t"),
+    );
+    assert!(w.table.seen.is_empty());
+    assert_eq!(w.sock.sent.len(), sent_before);
+}

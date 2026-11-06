@@ -307,6 +307,28 @@ impl Traversals {
         self.settle(ctx, touched);
     }
 
+    /// Shuts down cleanly (libtorrent `~rpc_manager`): no further request is
+    /// sent and no response accepted; every outstanding request is aborted,
+    /// which tells the routing table it failed and lets its lookup finish
+    /// (without issuing anything new). Afterwards no traversal, observer or
+    /// transaction is left.
+    pub fn shutdown(&mut self, ctx: &mut NodeCtx<'_>) {
+        ctx.rpc.begin_shutdown();
+        let mut touched = Vec::new();
+        for obs in ctx.rpc.take_all_transactions() {
+            let tid = ctx.rpc.observers.get(obs).and_then(|o| o.traversal);
+            match tid {
+                Some(tid) => {
+                    self.with(tid, |t| algorithm::observer_abort(t, ctx, obs));
+                    touched.push(tid);
+                }
+                None => detached::abort(ctx, obs),
+            }
+            ctx.rpc.observers.release(obs);
+        }
+        self.settle(ctx, touched);
+    }
+
     /// A snapshot of every lookup that was started and still exists, ordered
     /// by id (the `requests` of libtorrent's `dht_status`; like there, a
     /// finished lookup stays listed while requests that refer to it are
@@ -445,6 +467,18 @@ mod detached {
             Some(o) if !o.has_short_timeout() => o.flags |= ObserverFlags::SHORT_TIMEOUT,
             _ => return,
         }
+        node_failed(ctx, obs);
+    }
+
+    /// `observer::abort` with an empty dummy algorithm.
+    pub(super) fn abort(ctx: &mut NodeCtx<'_>, obs: ObserverId) {
+        let Some(o) = ctx.rpc.observers.get_mut(obs) else {
+            return;
+        };
+        if o.flags.contains(ObserverFlags::DONE) {
+            return;
+        }
+        o.flags |= ObserverFlags::DONE;
         node_failed(ctx, obs);
     }
 
