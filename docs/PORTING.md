@@ -47,45 +47,91 @@ These signatures are the contract. A package may add methods but must not
 change these without telling the others. Types in `code` are Rust; "ports"
 names the libtorrent member.
 
-**WP1 -> WP2, WP4: `RoutingTable` and `NodeEntry`**
+**WP1 -> WP2, WP4: `RoutingTable` and `NodeEntry`** (landed; the code is the
+reference, this is the summary. Changes from the first sketch are marked
+*changed*.)
 
 ```rust
 pub struct NodeEntry {            // node_entry
-    pub id: NodeId, pub endpoint: SocketAddr, pub rtt: u16 /* 0xffff unknown */,
-    pub timeout_count: u8 /* 0xff = never pinged */, pub verified: bool,
-    pub last_queried: Time,
+    pub last_queried: Time /* ZERO = never */, pub id: NodeId, pub endpoint: SocketAddr,
+    pub rtt: u16 /* RTT_UNKNOWN = 0xffff */, pub timeout_count: u8 /* NEVER_PINGED = 0xff */,
+    pub verified: bool,
 }
 impl NodeEntry {
-    pub fn new(id: NodeId, ep: SocketAddr, rtt: u16, pinged: bool) -> Self;
+    pub fn new(id: NodeId, ep: SocketAddr, rtt: u16, pinged: bool) -> Self; // last_queried = ZERO
+    /// changed (new): like `new`, but a pinged entry gets last_queried = now (libtorrent reads the clock here)
+    pub fn new_at(id: NodeId, ep: SocketAddr, rtt: u16, pinged: bool, now: Time) -> Self;
     pub fn unknown_id(ep: SocketAddr) -> Self;               // node_entry(ep)
-    pub fn pinged(&self) -> bool; pub fn confirmed(&self) -> bool;
-    pub fn fail_count(&self) -> u32; pub fn update_rtt(&mut self, rtt: u16);
-    // Ord: "better" nodes sort first (verified, then lower rtt)
+    pub fn pinged(&self) -> bool; pub fn confirmed(&self) -> bool; pub fn fail_count(&self) -> u32;
+    pub fn set_pinged(&mut self); pub fn timed_out(&mut self); pub fn reset_fail_count(&mut self);
+    pub fn update_rtt(&mut self, rtt: u16);
+    pub fn ep(&self) -> SocketAddr; pub fn addr(&self) -> IpAddr; pub fn port(&self) -> u16;
+    /// changed: not `Ord` (libtorrent's operator< looks at (verified, rtt) only, so it is not
+    /// consistent with Eq); `a.is_better_than(&b)` is `a < b`, `quality_cmp` the three-way form.
+    pub fn is_better_than(&self, other: &Self) -> bool;
 }
+
 pub struct RoutingTable { /* ... */ }
 impl RoutingTable {
-    pub fn new(id: NodeId, protocol: Protocol, bucket_size: usize, settings: &DhtSettings) -> Self;
+    pub fn new(id: NodeId, protocol: Protocol, bucket_size: usize, settings: &DhtSettings) -> Self; // panics unless bucket_size is a power of two
+    pub fn try_new(..same..) -> Result<Self, RoutingTableError>;
     pub fn id(&self) -> NodeId;            pub fn protocol(&self) -> Protocol;
-    pub fn set_id(&mut self, id: NodeId);  // rebuilds buckets (routing_table_set_id)
-    /// ports node_seen: returns whether the node was added/refreshed.
+    /// changed: takes `now` (re-adds every node, and add_node needs the clock)
+    pub fn set_id(&mut self, id: NodeId, now: Time);          // update_node_id
+    /// changed (new): the table keeps a COPY of the settings (libtorrent keeps a reference to the live
+    /// session_settings). Node must call this whenever settings change.
+    pub fn set_settings(&mut self, s: &DhtSettings);
+    /// changed (new): `dht_observer::get_dht_ip_filter` + `apply_filter_to_dht`; closure returns true = blocked.
+    pub fn set_ip_filter(&mut self, f: Option<IpFilter>);
     pub fn node_seen(&mut self, id: NodeId, ep: SocketAddr, rtt: u16, now: Time) -> bool;
-    pub fn add_node(&mut self, e: NodeEntry, now: Time) -> bool;      // add_node
+    pub fn add_node(&mut self, e: NodeEntry, now: Time) -> bool;
     pub fn heard_about(&mut self, id: NodeId, ep: SocketAddr, now: Time);
-    pub fn node_failed(&mut self, id: NodeId, ep: SocketAddr);
+    pub fn node_failed(&mut self, id: &NodeId, ep: SocketAddr);       // changed: id by reference
+    pub fn add_router_node(&mut self, ep: SocketAddr); pub fn router_nodes(&self) -> impl Iterator<Item = &SocketAddr>;
+    /// count == 0 means bucket_size. Result is NOT sorted (libtorrent only selects the closest of the last bucket).
     pub fn find_node(&self, target: &NodeId, opts: FindNodeOptions, count: usize) -> Vec<NodeEntry>;
-    pub fn next_refresh(&mut self, now: Time) -> Option<(NodeEntry, usize /*bucket*/)>;
+    /// libtorrent's next_refresh() returns a pointer; here the stamped entry and its bucket index.
+    /// Tick with a clock that starts after Time::ZERO (ZERO means "never queried").
+    pub fn next_refresh(&mut self, now: Time) -> Option<(NodeEntry, usize)>;
     pub fn size(&self) -> (usize, usize, usize);   // (nodes, replacements, confirmed)
-    pub fn depth(&self) -> usize;  pub fn bucket_size(&self) -> usize;
-    pub fn for_each_node(&self, f: impl FnMut(&NodeEntry), replacements: impl FnMut(&NodeEntry));
-    pub fn all_in_same_bucket(..), pub fn num_global_nodes(&self) -> u64;
-    pub fn status(&self) -> Vec<BucketStatus>;     // dht_routing_bucket alert data
-    pub fn increment_out_message(&mut self); pub fn increment_message_count(..);
-    pub fn restrict_ips / ip-set bookkeeping is internal.
+    pub fn depth(&self) -> usize;                  // 0 for an empty table (libtorrent: -1, and stuck there; see below)
+    pub fn bucket_size(&self) -> usize;            // k;  the per-bucket count is `bucket_len(i)` (changed: renamed)
+    pub fn bucket_limit(&self, bucket: usize) -> usize; pub fn is_full(&self, bucket: usize) -> bool;
+    pub fn num_active_buckets(&self) -> usize;     pub fn buckets(&self) -> &[Bucket];
+    pub fn num_global_nodes(&self) -> u64;
+    pub fn for_each_node(&self, live: impl FnMut(&NodeEntry), replacements: impl FnMut(&NodeEntry));
+    pub fn for_each_entry(&self, f: impl FnMut(&NodeEntry));   // libtorrent's one-callback for_each_node
+    pub fn live_nodes(&self) -> impl Iterator<Item = &NodeEntry>; pub fn replacement_nodes(&self) -> ...;
+    pub fn status(&self) -> Vec<BucketStatus>;     // dht_routing_bucket alert data; status_into() is libtorrent's exact accumulating form
+    pub fn native_address / native_endpoint(..);
+    pub fn check_invariants(&self) -> Result<(), InvariantError>;  // tests and fuzzing
+    pub fn print_state(&self, now: Time) -> String; pub fn write_state(&self, out: &mut dyn fmt::Write, now: Time) -> fmt::Result;
 }
+// libtorrent has no increment_out_message / increment_message_count at this commit: not ported.
 pub fn classify_prefix(bucket_idx: usize, last_bucket: bool, bucket_size: usize, nid: &NodeId) -> u8;
 pub fn mostly_verified_nodes(bucket: &[NodeEntry]) -> bool;
 pub fn compare_ip_cidr(lhs: IpAddr, rhs: IpAddr) -> bool;
+pub fn all_in_same_bucket(b: &[NodeEntry], id: &NodeId, bucket_index: usize) -> bool;
+pub fn replace_node_impl(e: &NodeEntry, b: &mut [NodeEntry], ips: &mut IpSet, bucket_index: usize,
+                         bucket_size_limit: usize, last_bucket: bool) -> AddNodeStatus;
 ```
+
+A libtorrent bug found while porting: `routing_table::depth()` stores `-1` in its
+cached `m_depth` when called on an empty table and then returns it forever
+(the early return for negative values never recomputes), even after nodes
+arrive. `node::tick` calls `depth()` before the first node exists, so the
+"rebootstrap while depth < 4" check is permanently true and the node re-runs
+its self-bootstrap every ten minutes. Fixed here (the cache never goes
+negative); regression test `test_depth_recovers_after_empty_table`.
+
+A second libtorrent bug (found by the `routing_table_ops` fuzzer): after
+splitting the last bucket, `routing_table::add_node` erases the new bucket
+"if none of the nodes ended up in it" but only checks `live_nodes`; a new
+bucket holding only replacements is erased with them and their addresses
+stay in `m_ips` forever (with the default `dht_restrict_routing_ips` such an
+IP can then never be added again). Fixed here by also requiring the
+replacement cache to be empty; regression test
+`test_split_does_not_drop_a_new_bucket_holding_only_replacements`.
 
 **WP2 -> WP4: the traversal family and `NodeCtx`** (revised by WP2: the
 first sketch did not survive the borrow checker, see "why" below)
@@ -210,8 +256,8 @@ WP4's.
 | `socket_manager (node.hpp)` | `src/transport.rs` | foundation | done | `Transport` |
 | `aux::time_now, aux::random` | `src/time.rs, src/rng.rs` | foundation | done | `Time`, `Clock`, `Rng` |
 | `test/test_dht.cpp helpers (mock_socket, msg_args, ...)` | `src/testing.rs` | foundation | done | harness |
-| `include/libtorrent/kademlia/node_entry.hpp + src/kademlia/node_entry.cpp` | `src/node_entry.rs` | WP1 | todo |  |
-| `include/libtorrent/kademlia/routing_table.hpp + src/kademlia/routing_table.cpp` | `src/routing_table.rs` | WP1 | todo | replacement buckets, extended table, IP restriction (`compare_ip_cidr`), `classify_prefix`, `mostly_verified_nodes`, refresh scheduling |
+| `include/libtorrent/kademlia/node_entry.hpp + src/kademlia/node_entry.cpp` | `src/node_entry.rs` | WP1 | done | `NodeEntry`; `new_at` takes the clock, `is_better_than` replaces `operator<` |
+| `include/libtorrent/kademlia/routing_table.hpp + src/kademlia/routing_table.cpp` | `src/routing_table.rs` | WP1 | done | replacement buckets, extended table, IP restriction (`compare_ip_cidr`), `classify_prefix`, `mostly_verified_nodes`, refresh scheduling |
 | `include/libtorrent/kademlia/observer.hpp` | `src/observer.rs` | WP2 | done | request record in the rpc manager arena |
 | `include/libtorrent/kademlia/rpc_manager.hpp + src/kademlia/rpc_manager.cpp` | `src/rpc_manager.rs` | WP2 | done | transaction table, timeouts, `unreachable` |
 | `include/libtorrent/kademlia/traversal_algorithm.hpp + .cpp` | `src/traversal/algorithm.rs` | WP2 | done |  |
@@ -249,8 +295,8 @@ WP4's.
 | `bloom_filter` | `tests/bloom_filter.rs` | WP3 |
 | `put_v4` | `tests/dht_node.rs` | WP4 |
 | `put_v6` | `tests/dht_node.rs` | WP4 |
-| `routing_table_v4` | `tests/routing_table.rs` | WP1 |
-| `routing_table_v6` | `tests/routing_table.rs` | WP1 |
+| `routing_table_v4` | `tests/routing_table.rs` | done |
+| `routing_table_v6` | `tests/routing_table.rs` | done |
 | `bootstrap_v4` | `tests/traversal.rs` | WP2 |
 | `bootstrap_v6` | `tests/traversal.rs` | WP2 |
 | `bootstrap_want_v4` | `tests/traversal.rs` | WP2 |
@@ -274,11 +320,11 @@ WP4's.
 | `signing_test3` | `tests/item.rs` | WP3 |
 | `signing_oversized_salt` | `tests/item.rs` | WP3 |
 | `verify_message` | `tests/msg.rs` | done |
-| `routing_table_uniform` | `tests/routing_table.rs` | WP1 |
-| `routing_table_balance` | `tests/routing_table.rs` | WP1 |
-| `routing_table_extended` | `tests/routing_table.rs` | WP1 |
-| `routing_table_set_id` | `tests/routing_table.rs` | WP1 |
-| `routing_table_for_each` | `tests/routing_table.rs` | WP1 |
+| `routing_table_uniform` | `tests/routing_table.rs` | done |
+| `routing_table_balance` | `tests/routing_table.rs` | done |
+| `routing_table_extended` | `tests/routing_table.rs` | done |
+| `routing_table_set_id` | `tests/routing_table.rs` | done |
+| `routing_table_for_each` | `tests/routing_table.rs` | done |
 | `node_set_id` | `tests/dht_node.rs` | WP4 |
 | `read_only_node` | `tests/dht_node.rs` | WP4 |
 | `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | WP2 done |
@@ -287,20 +333,20 @@ WP4's.
 | `rpc_invalid_error_msg` | `tests/rpc_manager.rs` | WP2 done |
 | `node_id_bucket_distribution` | `tests/node_id.rs` | done |
 | `node_id_min_distance_exp` | `tests/node_id.rs` | done |
-| `dht_verify_node_address` | `tests/routing_table.rs` | WP1 |
+| `dht_verify_node_address` | `tests/routing_table.rs` | done |
 | `dht_ip_filter` | `tests/dht_node.rs` | WP4 |
 | `dht_tracker_ip_filter` | `tests/dht_tracker.rs` | WP4 |
 | `dht_node_add_node_ip_filter` | `tests/dht_node.rs` | WP4 |
 | `generate_prefix_mask` | `tests/node_id.rs` | done |
 | `distance_exp` | `tests/node_id.rs` | done |
-| `compare_ip_cidr` | `tests/routing_table.rs` | WP1 |
+| `compare_ip_cidr` | `tests/routing_table.rs` | done |
 | `dht_state` | `tests/dht_state.rs` | WP3 |
 | `sample_infohashes` | `tests/traversal.rs` | WP2 |
-| `node_entry_comparison` | `tests/node_entry.rs` | WP1 |
-| `mostly_verified_nodes` | `tests/routing_table.rs` | WP1 |
-| `classify_prefix` | `tests/routing_table.rs` | WP1 |
-| `replace_node_impl` | `tests/routing_table.rs` | WP1 |
-| `all_in_same_bucket` | `tests/routing_table.rs` | WP1 |
+| `node_entry_comparison` | `tests/node_entry.rs` | done |
+| `mostly_verified_nodes` | `tests/routing_table.rs` | done |
+| `classify_prefix` | `tests/routing_table.rs` | done |
+| `replace_node_impl` | `tests/routing_table.rs` | done |
+| `all_in_same_bucket` | `tests/routing_table.rs` | done |
 | `rate_limit_non_positive` | `tests/dht_tracker.rs` | WP4 |
 | `rate_limit_int_max` | `tests/dht_tracker.rs` | WP4 |
 | `rate_limit_large_delta` | `tests/dht_tracker.rs` | WP4 |
@@ -456,5 +502,5 @@ libtorrent drives these through `libsimulator`. Here they are deterministic mult
 
 ## Fuzzers (`fuzzers/src/`)
 
-libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*_reply.cpp`, `dht_put_item_request.cpp`. Mapped to `fuzz/fuzz_targets/`: `bdecode` (done), `message_parse` (done), and for the packages: `node_incoming` (`dht_node.cpp`, WP4), `traversal_replies` (the `dht_*_reply.cpp` family, WP2), `item_verify` (WP3), `state_load` (WP3), `storage_ops` (WP3), `routing_table_ops` (WP1).
+libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*_reply.cpp`, `dht_put_item_request.cpp`. Mapped to `fuzz/fuzz_targets/`: `bdecode` (done), `message_parse` (done), and for the packages: `node_incoming` (`dht_node.cpp`, WP4), `traversal_replies` (the `dht_*_reply.cpp` family, WP2), `item_verify` (WP3), `state_load` (WP3), `storage_ops` (WP3), `routing_table_ops` (WP1, done).
 
