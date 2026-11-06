@@ -51,3 +51,10 @@ path = "fuzz_targets/item_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "storage_ops"
+path = "fuzz_targets/storage_ops.rs"
+test = false
+doc = false
+bench = false
