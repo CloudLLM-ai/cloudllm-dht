@@ -8,8 +8,10 @@
 //! The blocker keeps a table of the [`NUM_BAN_NODES`] busiest recent
 //! senders. A sender that delivers `rate_limit * 10` packets inside a
 //! 10 second window (an average of `rate_limit` packets per second) is
-//! ignored until it has been silent for the block timeout; a sender that
-//! stays under the rate has its counter reset every 10 seconds. The table
+//! ignored for the block timeout, counted from the packet that tripped the
+//! ban (the ban is a fixed length: continued sending does not extend it,
+//! although libtorrent's source comment says "until it's silent for 5
+//! minutes"); a sender that stays under the rate has its counter reset every 10 seconds. The table
 //! is deliberately tiny and fixed-size: an attacker spraying addresses
 //! cannot grow it, only evict the quietest entries.
 
@@ -189,8 +191,8 @@ impl DosBlocker {
             return DosDecision::Allow;
         }
         if now < e.limit {
-            // too many packets in under 10 s: ignore this sender until it
-            // has been silent for the block timeout
+            // too many packets in under 10 s: ignore this sender for the
+            // block timeout (fixed length, not extended by further packets)
             let newly_banned = e.count == threshold;
             let window_ms = signed_millis(now, e.limit) + 10_000;
             let count = e.count;
