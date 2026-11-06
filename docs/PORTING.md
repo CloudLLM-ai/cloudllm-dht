@@ -87,45 +87,68 @@ pub fn mostly_verified_nodes(bucket: &[NodeEntry]) -> bool;
 pub fn compare_ip_cidr(lhs: IpAddr, rhs: IpAddr) -> bool;
 ```
 
-**WP2 -> WP4: the traversal family and `NodeCtx`**
+**WP2 -> WP4: the traversal family and `NodeCtx`** (revised by WP2: the
+first sketch did not survive the borrow checker, see "why" below)
 
 ```rust
 /// What a traversal may touch while handling an event; built by Node per call.
 pub struct NodeCtx<'a> {
-    pub now: Time,
-    pub id: NodeId,
-    pub protocol: Protocol,
+    pub now: Time, pub id: NodeId, pub protocol: Protocol,
     pub settings: &'a DhtSettings,
-    pub table: &'a mut RoutingTable,
-    pub rpc: &'a mut RpcManager,
+    pub table: &'a mut dyn TableOps,                // WP1's RoutingTable implements it (impl lives in ctx.rs)
+    pub rpc: &'a mut RpcManager,                    // transaction table + observer arena
     pub transport: &'a mut dyn Transport,
     pub rng: &'a mut dyn Rng,
-    pub events: &'a mut Vec<Event>,                 // WP4's Event enum (events.rs)
+    pub events: &'a mut Vec<Event>,                 // events.rs
+    pub id_secret: IdSecret,                        // make_id_secret for the bootstrap target
+    /* private: ip filter, follow-up traversal queue, ping queue */
 }
+impl NodeCtx<'_> {
+    pub fn new(now, id, protocol, settings, table, rpc, transport, rng, events, id_secret) -> NodeCtx;
+    pub fn with_ip_filter(self, blocked: &dyn Fn(IpAddr) -> bool) -> NodeCtx; // apply_filter_to_dht
+    // rpc_manager operations (methods here because `ctx.rpc.invoke(ctx, ..)` would borrow twice):
+    pub fn invoke(&mut self, e: Entry, target: SocketAddr, obs: ObserverId) -> bool;
+    pub fn invoke_detached(&mut self, kind: ObserverKind /*Ping|Announce*/, id: NodeId, target: SocketAddr, e: Entry) -> bool;
+    pub fn rpc_incoming(&mut self, from: SocketAddr, msg: &Node<'_>) -> Incoming; // Ignored | Failed(obs) | Reply{observer,id,rtt}
+    pub fn rpc_tick(&mut self) -> TickOutcome;      // low level; Traversals::tick wraps it
+    pub fn rpc_unreachable(&mut self, ep: SocketAddr) -> Option<ObserverId>;
+    pub fn take_pings(&mut self) -> Vec<SocketAddr>; // bootstrap::done's node.add_node(ep); node pings each
+}
+pub trait TableOps {                                // the methods traversals call on routing_table
+    fn bucket_size(&self) -> usize;
+    fn heard_about(&mut self, id: NodeId, ep: SocketAddr, now: Time);
+    fn node_failed(&mut self, id: NodeId, ep: SocketAddr);
+    fn node_seen(&mut self, id: NodeId, ep: SocketAddr, rtt: u16, now: Time) -> bool;
+    fn closest_including_failed(&self, target: &NodeId) -> Vec<(NodeId, SocketAddr)>;
+    fn router_nodes(&self) -> Vec<SocketAddr>;
+}
+pub struct RpcManager { .. }   // RpcManager::new(our_id), update_node_id, add_our_id, num_allocated_observers, our_id
 pub struct TraversalId(pub u64);
-pub trait Traversal {                                // traversal_algorithm virtuals
-    fn name(&self) -> &'static str;
-    fn start(&mut self, ctx: &mut NodeCtx<'_>);      // add_entry + add_requests
-    fn on_reply(&mut self, ctx: &mut NodeCtx<'_>, from: NodeEndpoint, msg: &Node<'_>);
-    fn on_timeout(&mut self, ctx: &mut NodeCtx<'_>, ep: SocketAddr);
-    fn on_short_timeout(&mut self, ctx: &mut NodeCtx<'_>, ep: SocketAddr);
-    fn is_done(&self) -> bool;
-}
-impl RpcManager {                                    // rpc_manager
-    pub fn new(our_id: NodeId, settings: &DhtSettings) -> Self;
-    /// Allocates a transaction id, records the observer, adds `t`, `y`, `id` and sends.
-    pub fn invoke(&mut self, ctx: &mut NodeCtx<'_>, e: Entry, target: SocketAddr, observer: Observer) -> bool;
-    /// Matches a response/error to its observer; returns the observer and the sender id.
-    pub fn incoming(&mut self, ctx: &mut NodeCtx<'_>, from: SocketAddr, msg: &Node<'_>) -> Option<IncomingReply>;
-    pub fn tick(&mut self, ctx: &mut NodeCtx<'_>) -> Duration;   // timeouts; returns next tick delay
+pub trait Traversal: Send { /* name, algo, new_observer, start, invoke, done, on_reply, on_timeout, on_short_timeout */ }
+/// The arena the node owns; routes every event to the right traversal.
+pub struct Traversals { .. }
+impl Traversals {
+    pub fn new() -> Self;
+    pub fn spawn(&mut self, ctx: &mut NodeCtx<'_>, t: Box<dyn Traversal>) -> TraversalId;
+    /// Handles y=r / y=e: rpc match, observer.reply/timeout, then table.node_seen.
+    /// Some(id) = node_seen asked for a refresh of that node.
+    pub fn incoming(&mut self, ctx: &mut NodeCtx<'_>, from: SocketAddr, msg: &Node<'_>) -> Option<NodeId>;
+    pub fn tick(&mut self, ctx: &mut NodeCtx<'_>) -> Duration;      // rpc timeouts; delay to next tick
     pub fn unreachable(&mut self, ctx: &mut NodeCtx<'_>, ep: SocketAddr);
-    pub fn update_node_id(&mut self, id: NodeId); pub fn add_our_id(&self, e: &mut Entry);
+    pub fn status(&self, ctx: &NodeCtx<'_>) -> Vec<LookupStatus>;
 }
-// Constructors Node (WP4) calls; each returns a boxed Traversal plus a completion channel
-pub fn bootstrap(...), refresh(...), find_data(...), get_peers(...), get_item(...),
-       put_data(...), sample_infohashes(...), direct_request(...)
-// Results flow back to the caller as Events, never as callbacks (see events below).
+// Constructors Node (WP4) calls (each returns a Box<dyn Traversal> for `Traversals::spawn`):
+//   bootstrap, get_peers/announce, get_item_*, put_item_*, sample_infohashes, direct_request  (module docs list exact signatures)
+// Results flow back as Events pushed on ctx.events, never as callbacks.
 ```
+
+Why: `ctx.rpc.invoke(ctx, ..)` borrows `ctx` twice, so the rpc operations that
+need the socket, settings and rng are methods of `NodeCtx`; `RpcManager` is
+the state. The table is a trait object so traversals do not depend on the
+routing table's layout (and can be fuzzed against a fake). Observers live in
+an arena inside `RpcManager` (reference counted, like libtorrent's
+`shared_ptr<observer>`); a traversal is dropped when it is done and its last
+observer is freed.
 
 **WP3 -> WP2, WP4: `DhtStorage`, `Item`, `DhtState`, `AnnounceFlags`**
 
@@ -189,9 +212,9 @@ WP4's.
 | `test/test_dht.cpp helpers (mock_socket, msg_args, ...)` | `src/testing.rs` | foundation | done | harness |
 | `include/libtorrent/kademlia/node_entry.hpp + src/kademlia/node_entry.cpp` | `src/node_entry.rs` | WP1 | todo |  |
 | `include/libtorrent/kademlia/routing_table.hpp + src/kademlia/routing_table.cpp` | `src/routing_table.rs` | WP1 | todo | replacement buckets, extended table, IP restriction (`compare_ip_cidr`), `classify_prefix`, `mostly_verified_nodes`, refresh scheduling |
-| `include/libtorrent/kademlia/observer.hpp` | `src/observer.rs` | WP2 | todo | request record in the rpc manager arena |
-| `include/libtorrent/kademlia/rpc_manager.hpp + src/kademlia/rpc_manager.cpp` | `src/rpc_manager.rs` | WP2 | todo | transaction table, timeouts, `unreachable` |
-| `include/libtorrent/kademlia/traversal_algorithm.hpp + .cpp` | `src/traversal/algorithm.rs` | WP2 | todo |  |
+| `include/libtorrent/kademlia/observer.hpp` | `src/observer.rs` | WP2 | done | request record in the rpc manager arena |
+| `include/libtorrent/kademlia/rpc_manager.hpp + src/kademlia/rpc_manager.cpp` | `src/rpc_manager.rs` | WP2 | done | transaction table, timeouts, `unreachable` |
+| `include/libtorrent/kademlia/traversal_algorithm.hpp + .cpp` | `src/traversal/algorithm.rs` | WP2 | done |  |
 | `include/libtorrent/kademlia/find_data.hpp + .cpp` | `src/traversal/find_data.rs` | WP2 | todo |  |
 | `include/libtorrent/kademlia/get_peers.hpp + .cpp` | `src/traversal/get_peers.rs` | WP2 | todo | incl. BEP 33 scrape reply parsing |
 | `include/libtorrent/kademlia/get_item.hpp + .cpp` | `src/traversal/get_item.rs` | WP2 | todo | BEP 44 get |
@@ -258,10 +281,10 @@ WP4's.
 | `routing_table_for_each` | `tests/routing_table.rs` | WP1 |
 | `node_set_id` | `tests/dht_node.rs` | WP4 |
 | `read_only_node` | `tests/dht_node.rs` | WP4 |
-| `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | WP2 |
-| `invalid_error_msg` | `tests/rpc_manager.rs` | WP2 |
-| `unsorted_traversal_results` | `tests/traversal.rs` | WP2 |
-| `rpc_invalid_error_msg` | `tests/rpc_manager.rs` | WP2 |
+| `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | WP2 done |
+| `invalid_error_msg` | `tests/rpc_manager.rs` | WP2 done |
+| `unsorted_traversal_results` | `tests/traversal.rs` | WP2 done |
+| `rpc_invalid_error_msg` | `tests/rpc_manager.rs` | WP2 done |
 | `node_id_bucket_distribution` | `tests/node_id.rs` | done |
 | `node_id_min_distance_exp` | `tests/node_id.rs` | done |
 | `dht_verify_node_address` | `tests/routing_table.rs` | WP1 |
