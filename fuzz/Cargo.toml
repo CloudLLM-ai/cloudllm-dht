@@ -44,3 +44,10 @@ path = "fuzz_targets/state_load.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "item_verify"
+path = "fuzz_targets/item_verify.rs"
+test = false
+doc = false
+bench = false
