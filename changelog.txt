@@ -1,5 +1,16 @@
 UNRELEASED
 
+  - feat(rpc,traversal): the rpc manager, observers and every traversal:
+    transaction ids matched on endpoint, short (1 s) and full (15 s)
+    timeouts, the sorted result list with branch factor and short-timeout
+    slots, find_data write tokens, get_peers (plain and two-phase
+    obfuscated) with announce_peer, bootstrap, BEP 44 get and put,
+    BEP 51 sample_infohashes and direct requests. Results leave as Events.
+    Observers live in a reference-counted arena and a traversal is dropped
+    with its last observer, like libtorrent's shared_ptr. All assigned
+    test_dht.cpp cases pass; a traversal_replies fuzz target covers every
+    response parser.
+
   - feat(storage): the DHT storage trait and its in-memory implementation
     (dht_storage_interface, dht_default_storage): BEP 5 peers with seeds,
     downloaders and BEP 33 scrape bloom filters, a 16-peer limit per IPv6
