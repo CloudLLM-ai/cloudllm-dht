@@ -103,6 +103,9 @@ pub struct World {
     pub id: NodeId,
     pub protocol: Protocol,
     pub secret: IdSecret,
+    /// Endpoints the traversals asked the node to ping (`NodeCtx::take_pings`),
+    /// collected after every call.
+    pub pings: Vec<SocketAddr>,
 }
 
 impl World {
@@ -120,6 +123,7 @@ impl World {
             id,
             protocol,
             secret: IdSecret::from_value(0x1234_5678),
+            pings: Vec::new(),
         }
     }
 
@@ -147,7 +151,33 @@ impl World {
             &mut self.events,
             self.secret,
         );
-        f(&mut ctx, &mut self.traversals)
+        let r = f(&mut ctx, &mut self.traversals);
+        self.pings.extend(ctx.take_pings());
+        r
+    }
+
+    /// Like [`World::run`], with an IP filter installed.
+    pub fn run_with_filter<R>(
+        &mut self,
+        blocked: &dyn Fn(std::net::IpAddr) -> bool,
+        f: impl FnOnce(&mut NodeCtx<'_>, &mut Traversals) -> R,
+    ) -> R {
+        let mut ctx = NodeCtx::new(
+            self.now,
+            self.id,
+            self.protocol,
+            &self.settings,
+            &mut self.table,
+            &mut self.rpc,
+            &mut self.sock,
+            &mut self.rng,
+            &mut self.events,
+            self.secret,
+        )
+        .with_ip_filter(blocked);
+        let r = f(&mut ctx, &mut self.traversals);
+        self.pings.extend(ctx.take_pings());
+        r
     }
 
     /// Delivers a response or error datagram (`node.incoming`).

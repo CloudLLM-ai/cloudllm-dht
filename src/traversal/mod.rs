@@ -230,15 +230,14 @@ impl Traversals {
     }
 
     /// Drops the traversals among `touched` and those that just lost their
-    /// last observer, if they are finished: nothing can reach them any more.
+    /// last observer: with no observer left (an observer is held by the
+    /// result list until the lookup is done, and by its request until the
+    /// answer or the timeout) nothing can reach them any more. This is the
+    /// moment libtorrent's `shared_ptr<traversal_algorithm>` count hits zero.
     fn reap(&mut self, ctx: &mut NodeCtx<'_>, touched: &[TraversalId]) {
         let idle = ctx.rpc.observers.take_idle();
         for id in idle.iter().chain(touched) {
-            let finished = self
-                .live
-                .get(id)
-                .is_some_and(|t| t.is_done() && ctx.rpc.observers.live_for(*id) == 0);
-            if finished {
+            if ctx.rpc.observers.live_for(*id) == 0 {
                 self.live.remove(id);
             }
         }
@@ -308,13 +307,15 @@ impl Traversals {
         self.settle(ctx, touched);
     }
 
-    /// A snapshot of every running lookup, ordered by id (the `requests` of
-    /// libtorrent's `dht_status`).
+    /// A snapshot of every lookup that was started and still exists, ordered
+    /// by id (the `requests` of libtorrent's `dht_status`; like there, a
+    /// finished lookup stays listed while requests that refer to it are
+    /// still in flight).
     #[must_use]
     pub fn status(&self, ctx: &NodeCtx<'_>) -> Vec<LookupStatus> {
         self.live
             .values()
-            .filter(|t| !t.is_done())
+            .filter(|t| t.algo().is_initialized())
             .map(|t| status_of(&**t, ctx))
             .collect()
     }

@@ -68,6 +68,7 @@ pub struct Algorithm {
     timeouts: i32,
     done: bool,
     abort: bool,
+    initialized: bool,
     peer4_prefixes: BTreeSet<u32>,
     peer6_prefixes: BTreeSet<u64>,
 }
@@ -89,6 +90,7 @@ impl Algorithm {
             timeouts: 0,
             done: false,
             abort: false,
+            initialized: false,
             peer4_prefixes: BTreeSet::new(),
             peer6_prefixes: BTreeSet::new(),
         }
@@ -149,6 +151,15 @@ impl Algorithm {
     #[must_use]
     pub fn is_done(&self) -> bool {
         self.done
+    }
+
+    /// `true` once the lookup was started with the base `start` (libtorrent
+    /// `init()` registers it as a running request). Lookups that are a
+    /// single request ([`SampleInfohashes`](super::sample_infohashes::SampleInfohashes),
+    /// [`DirectTraversal`](super::direct_request::DirectTraversal)) never are.
+    #[must_use]
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 
     /// Stops issuing new requests; the ones in flight still complete
@@ -361,7 +372,9 @@ pub fn base_start<T: Traversal + ?Sized>(t: &mut T, ctx: &mut NodeCtx<'_>) {
 
 /// Takes the branch factor from the settings (libtorrent `init`).
 pub fn init<T: Traversal + ?Sized>(t: &mut T, ctx: &NodeCtx<'_>) {
-    t.algo_mut().branch_factor = ctx.settings.search_branching;
+    let a = t.algo_mut();
+    a.branch_factor = ctx.settings.search_branching;
+    a.initialized = true;
 }
 
 /// Sends requests until the branch factor is met or the lookup has what it
