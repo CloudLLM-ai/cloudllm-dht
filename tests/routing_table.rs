@@ -1789,3 +1789,23 @@ fn test_split_does_not_drop_a_new_bucket_holding_only_replacements() {
     assert_eq!(t.size().0, 2);
     assert!(t.replacement_nodes().any(|e| e.id == x2));
 }
+
+/// `RoutingTable` as the traversals see it (`TableOps`): the calls reach the
+/// table, failed nodes are included and the result is nearest first.
+#[test]
+fn test_table_ops_forwards_to_the_table() {
+    use cloudllm_dht::ctx::TableOps;
+    let mut real = v4_table(id_with(0x00, 0), 8, &plain_settings());
+    let t: &mut dyn TableOps = &mut real;
+    assert_eq!(t.bucket_size(), 8);
+    let (a, b) = (id_with(0x80, 1), id_with(0x90, 2));
+    assert!(t.node_seen(a, ep4("4.4.4.4", 1), 10, now()));
+    assert!(t.node_seen(b, ep4("5.5.5.5", 1), 10, now()));
+    t.node_failed(a, ep4("4.4.4.4", 1));
+    t.heard_about(id_with(0xa0, 3), ep4("6.6.6.6", 1), now());
+    let near = t.closest_including_failed(&a);
+    assert_eq!(near.iter().map(|n| n.0).collect::<Vec<_>>(), [a, b]);
+    real.add_router_node(ep4("9.9.9.9", 6881));
+    let t: &dyn TableOps = &real;
+    assert_eq!(t.router_nodes(), [ep4("9.9.9.9", 6881)]);
+}

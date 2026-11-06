@@ -1667,3 +1667,36 @@ fn select_closest(
         }
     }
 }
+
+/// The traversals' view of the table (see [`crate::ctx::TableOps`]): each
+/// method forwards to the inherent method of the same name.
+impl crate::ctx::TableOps for RoutingTable {
+    fn bucket_size(&self) -> usize {
+        Self::bucket_size(self)
+    }
+
+    fn heard_about(&mut self, id: NodeId, ep: SocketAddr, now: Time) {
+        Self::heard_about(self, id, ep, now);
+    }
+
+    fn node_failed(&mut self, id: NodeId, ep: SocketAddr) {
+        Self::node_failed(self, &id, ep);
+    }
+
+    fn node_seen(&mut self, id: NodeId, ep: SocketAddr, rtt: u16, now: Time) -> bool {
+        Self::node_seen(self, id, ep, rtt, now)
+    }
+
+    /// `find_node(target, include_failed)` with the default count, sorted
+    /// nearest first (libtorrent's [`RoutingTable::find_node`] leaves the
+    /// order unspecified; the traversal sorts its candidates anyway).
+    fn closest_including_failed(&self, target: &NodeId) -> Vec<(NodeId, SocketAddr)> {
+        let mut nodes = self.find_node(target, FindNodeOptions::INCLUDE_FAILED, 0);
+        nodes.sort_by_key(|n| n.id ^ *target);
+        nodes.into_iter().map(|n| (n.id, n.endpoint)).collect()
+    }
+
+    fn router_nodes(&self) -> Vec<SocketAddr> {
+        Self::router_nodes(self).copied().collect()
+    }
+}
