@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
 cloudllm_dht = { path = ".." }
 
 # Its own workspace: keeps the fuzz crate out of the parent package's builds,
@@ -26,6 +27,13 @@ bench = false
 [[bin]]
 name = "message_parse"
 path = "fuzz_targets/message_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "routing_table_ops"
+path = "fuzz_targets/routing_table_ops.rs"
 test = false
 doc = false
 bench = false
