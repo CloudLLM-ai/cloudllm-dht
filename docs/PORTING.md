@@ -294,8 +294,8 @@ WP4's.
 | `include/libtorrent/kademlia/traversal_algorithm.hpp + .cpp` | `src/traversal/algorithm.rs` | WP2 | done |  |
 | `include/libtorrent/kademlia/find_data.hpp + .cpp` | `src/traversal/find_data.rs` | WP2 | done |  |
 | `include/libtorrent/kademlia/get_peers.hpp + .cpp` | `src/traversal/get_peers.rs` | WP2 | done | incl. BEP 33 scrape reply parsing |
-| `include/libtorrent/kademlia/get_item.hpp + .cpp` | `src/traversal/get_item.rs` | WP2 | todo | BEP 44 get |
-| `include/libtorrent/kademlia/put_data.hpp + .cpp` | `src/traversal/put_data.rs` | WP2 | todo | BEP 44 put, announce_peer |
+| `include/libtorrent/kademlia/get_item.hpp + .cpp` | `src/traversal/get_item.rs` | WP2 | done | BEP 44 get |
+| `include/libtorrent/kademlia/put_data.hpp + .cpp` | `src/traversal/put_data.rs` | WP2 | done | BEP 44 put, announce_peer |
 | `include/libtorrent/kademlia/sample_infohashes.hpp + .cpp` | `src/traversal/sample_infohashes.rs` | WP2 | done | BEP 51 |
 | `include/libtorrent/kademlia/direct_request.hpp` | `src/traversal/direct_request.rs` | WP2 | done |  |
 | `include/libtorrent/kademlia/refresh.hpp + src/kademlia/refresh.cpp (refresh, bootstrap)` | `src/traversal/refresh.rs` | WP2 | done | moved from WP1: a traversal subclass |
@@ -336,14 +336,14 @@ WP4's.
 | `short_nodes_v6` | `tests/traversal.rs` | done |
 | `get_peers_v4` | `tests/traversal.rs` | done |
 | `get_peers_v6` | `tests/traversal.rs` | done |
-| `mutable_get_v4` | `tests/traversal.rs` | WP2 |
-| `mutable_get_salt_v4` | `tests/traversal.rs` | WP2 |
-| `mutable_get_v6` | `tests/traversal.rs` | WP2 |
-| `mutable_get_salt_v6` | `tests/traversal.rs` | WP2 |
-| `immutable_get` | `tests/traversal.rs` | WP2 |
-| `immutable_put` | `tests/traversal.rs` | WP2 |
-| `mutable_put` | `tests/traversal.rs` | WP2 |
-| `traversal_done` | `tests/traversal.rs` | WP2 |
+| `mutable_get_v4` | `tests/traversal_items.rs` | done |
+| `mutable_get_salt_v4` | `tests/traversal_items.rs` | done |
+| `mutable_get_v6` | `tests/traversal_items.rs` | done |
+| `mutable_get_salt_v6` | `tests/traversal_items.rs` | done |
+| `immutable_get` | `tests/traversal_items.rs` | done |
+| `immutable_put` | `tests/traversal_items.rs` | done |
+| `mutable_put` | `tests/traversal_items.rs` | done |
+| `traversal_done` | `tests/traversal_items.rs` | done |
 | `dht_dual_stack` | `tests/dht_node.rs` | WP4 |
 | `multi_home` | `tests/dht_node.rs` | WP4 |
 | `signing_test1` | `tests/item.rs` | WP3 done |
