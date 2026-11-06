@@ -547,3 +547,13 @@ libtorrent drives these through `libsimulator`. Here they are deterministic mult
 
 libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*_reply.cpp`, `dht_put_item_request.cpp`. Mapped to `fuzz/fuzz_targets/`: `bdecode` (done), `message_parse` (done), and for the packages: `node_incoming` (`dht_node.cpp`, WP4), `traversal_replies` (the `dht_*_reply.cpp` family, WP2, done), `item_verify` (WP3), `state_load` (WP3), `storage_ops` (WP3), `routing_table_ops` (WP1, done).
 
+
+
+## libtorrent divergences and quirks found by WP2 (rpc manager, traversals)
+
+| # | libtorrent | behaviour | here | test |
+|---|---|---|---|---|
+| 1 | `src/kademlia/traversal_algorithm.cpp:348` (`failed`: `if (m_results.empty()) return;` before the short-timeout flag is set) | an observer outside a result list (ping, announce_peer, sample, direct, or one cancelled by a finished lookup) never records its short timeout, so `rpc_manager::tick` reports it every second until the 15 s timeout, each time calling `node_failed` (about 15 failures per dead ping) | **fixed**: the flag is recorded, one failure for the short timeout and one for the full timeout | `test_detached_short_timeout_is_reported_once` |
+| 2 | `src/kademlia/get_peers.cpp:187,201` (`obfuscated_get_peers::invoke`) | the comment promises "shared prefix + 3" bits of the real info-hash, but `160 - distance_exp()` is `clz + 1`, so 4 bits past the shared prefix are revealed | **fixed**: shared prefix (`clz`) + 3, a privacy fix other nodes cannot tell apart from a random ID | `test_obfuscated_get_peers_hides_the_target`, `obfuscate` doctest |
+| 3 | `traversal_algorithm::status` over `m_running_requests` | a finished lookup stays listed (with an empty list) while requests that refer to it are in flight | kept, documented on `Traversals::status` | `test_bootstrap_pings_candidates_it_did_not_reach` |
+| 4 | `get_peers_observer::reply` | peers in a response that arrives after the lookup finished are still reported | kept (useful), documented | `test_late_response_still_reports_peers` |

@@ -428,12 +428,13 @@ fn test_unreachable_takes_only_the_first_match() {
     assert_eq!(w.run(|ctx, _| ctx.rpc_unreachable(ep("10.9.9.9", 1))), None);
 }
 
-/// libtorrent quirk, kept: a ping or announce observer has no traversal
-/// results, so its short timeout is never recorded and `tick` reports it on
-/// every tick until the full timeout, each time counting a routing-table
-/// failure for the node.
+/// libtorrent bug, fixed: a ping or announce observer has no traversal
+/// results, so libtorrent never records its short timeout and `tick`
+/// reports it on every tick until the full timeout, each time counting a
+/// routing-table failure (about 15 per dead ping). Here the short timeout is
+/// recorded: one failure for it and one for the final timeout.
 #[test]
-fn test_detached_short_timeout_repeats_every_tick() {
+fn test_detached_short_timeout_is_reported_once() {
     let mut w = World::v4();
     let target = ep("10.0.0.1", 20);
     let id = Sha1Hash([0x33; 20]);
@@ -444,11 +445,11 @@ fn test_detached_short_timeout_repeats_every_tick() {
         w.advance(Duration::from_secs(1));
         w.tick();
     }
-    assert_eq!(w.table.failed.len(), 3);
-    assert!(w.table.failed.iter().all(|f| *f == (id, target)));
+    assert_eq!(w.table.failed.len(), 1);
+    assert_eq!(w.table.failed[0], (id, target));
     w.advance(TIMEOUT);
     w.tick();
-    assert_eq!(w.table.failed.len(), 4, "plus the final timeout");
+    assert_eq!(w.table.failed.len(), 2, "plus the final timeout");
     assert_eq!(w.rpc.num_allocated_observers(), 0);
 }
 

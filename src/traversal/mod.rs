@@ -437,22 +437,13 @@ mod detached {
         node_failed(ctx, obs);
     }
 
-    /// `observer::short_timeout` with an empty dummy algorithm.
-    ///
-    /// Unlike a traversal's observer this never records that the short
-    /// timeout fired (`failed` returns on the empty result list before it
-    /// sets the flag), so `rpc_manager::tick` reports it on every tick until
-    /// the full timeout, each time bumping the routing table's failure
-    /// count for the node. That is libtorrent's behaviour and is kept; see
-    /// `tests/rpc_manager.rs`.
+    /// `observer::short_timeout` with an empty dummy algorithm: tell the
+    /// table once and remember it. (libtorrent forgets to set the flag, so
+    /// it reports every tick; fixed here, see PORTING.md.)
     pub(super) fn short_timeout(ctx: &mut NodeCtx<'_>, obs: ObserverId) {
-        if ctx
-            .rpc
-            .observers
-            .get(obs)
-            .is_some_and(crate::observer::Observer::has_short_timeout)
-        {
-            return;
+        match ctx.rpc.observers.get_mut(obs) {
+            Some(o) if !o.has_short_timeout() => o.flags |= ObserverFlags::SHORT_TIMEOUT,
+            _ => return,
         }
         node_failed(ctx, obs);
     }

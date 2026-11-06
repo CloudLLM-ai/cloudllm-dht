@@ -520,6 +520,14 @@ pub fn failed<T: Traversal + ?Sized>(
         ctx.table.node_failed(id, ep);
     }
     if t.algo().results.is_empty() {
+        // An observer that is not in a result list (a sample or direct
+        // request, or one cancelled by a finished lookup) still has to
+        // remember its short timeout, or `rpc_manager::tick` reports it
+        // again every second. libtorrent returns here without setting the
+        // flag (traversal_algorithm.cpp, `failed`): see PORTING.md.
+        if short {
+            obs_mut(ctx, oid).flags |= ObserverFlags::SHORT_TIMEOUT;
+        }
         return;
     }
     debug_assert!(f.contains(ObserverFlags::QUERIED));
