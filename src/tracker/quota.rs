@@ -47,7 +47,7 @@ pub struct SendQuota {
     /// Bytes that may still be sent; negative when in debt.
     quota: i64,
     /// The previous call to [`SendQuota::has_quota`].
-    last_tick: Time,
+    last_tick: Option<Time>,
 }
 
 impl SendQuota {
@@ -57,7 +57,20 @@ impl SendQuota {
     pub fn new(limit: i32, now: Time) -> Self {
         Self {
             quota: i64::from(limit),
-            last_tick: now,
+            last_tick: Some(now),
+        }
+    }
+
+    /// A quota whose clock starts at the first [`SendQuota::has_quota`]
+    /// call: libtorrent initialises `m_last_tick` when the tracker is
+    /// built, but this crate's tracker is built without a time. Until the
+    /// first call the budget is one second's worth, and that call accrues
+    /// nothing.
+    #[must_use]
+    pub fn unstarted(limit: i32) -> Self {
+        Self {
+            quota: i64::from(limit),
+            last_tick: None,
         }
     }
 
@@ -72,8 +85,8 @@ impl SendQuota {
     /// `upload_rate_limit` setting in bytes per second; a limit of zero or
     /// less means "send nothing" and always returns `false`.
     pub fn has_quota(&mut self, now: Time, limit: i32) -> bool {
-        let delta = now - self.last_tick;
-        self.last_tick = now;
+        let delta = now - self.last_tick.unwrap_or(now);
+        self.last_tick = Some(now);
 
         let limit = i64::from(limit);
         if limit <= 0 {

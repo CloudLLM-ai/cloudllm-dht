@@ -99,3 +99,55 @@ fn test_prefilter_dark_internet() {
         assert!(!is_dark_internet(addr4(&format!("{first}.1.1.1"))));
     }
 }
+
+/// A quota built without a time starts with one second of budget and the
+/// first query accrues nothing, however late it comes (regression: the
+/// tracker once started its clock at the epoch and so began with the full
+/// three-second burst).
+#[test]
+fn test_quota_unstarted_begins_with_one_second() {
+    let mut q = SendQuota::unstarted(400);
+    assert!(q.has_quota(t(500_000), 400));
+    assert_eq!(q.remaining(), 400);
+}
+
+/// Ports `TEST_CASE(rate_limit_non_positive)` (the tracker's `has_quota` is
+/// [`SendQuota::has_quota`] here).
+#[test]
+fn test_rate_limit_non_positive() {
+    for limit in [0, -1] {
+        let mut q = SendQuota::unstarted(limit);
+        assert!(!q.has_quota(t(0), limit));
+    }
+}
+
+/// Ports `TEST_CASE(rate_limit_int_max)`: an increment above `INT_MAX` must
+/// not overflow.
+#[test]
+fn test_rate_limit_int_max() {
+    let mut q = SendQuota::unstarted(i32::MAX);
+    assert!(q.has_quota(t(0), i32::MAX));
+    assert!(q.has_quota(t(10), i32::MAX));
+}
+
+/// Ports `TEST_CASE(rate_limit_large_delta)`: a long gap must not push the
+/// quota past `INT_MAX`.
+#[test]
+fn test_rate_limit_large_delta() {
+    let mut q = SendQuota::unstarted(i32::MAX);
+    assert!(q.has_quota(t(0), i32::MAX));
+    assert!(q.has_quota(t(2500), i32::MAX));
+    assert!(q.remaining() <= i64::from(i32::MAX));
+}
+
+/// Ports `TEST_CASE(rate_limit_accrue_limit)`: repeated accrual stays
+/// capped.
+#[test]
+fn test_rate_limit_accrue_limit() {
+    let mut q = SendQuota::unstarted(i32::MAX);
+    assert!(q.has_quota(t(0), i32::MAX));
+    for i in 1..=10 {
+        assert!(q.has_quota(t(i * 500), i32::MAX));
+        assert!(q.remaining() <= i64::from(i32::MAX));
+    }
+}

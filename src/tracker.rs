@@ -290,7 +290,7 @@ impl DhtBuilder {
         blocker.set_block_timer(self.settings.block_timeout);
         blocker.set_rate_limit(self.settings.block_ratelimit);
         Dht {
-            quota: SendQuota::new(self.settings.upload_rate_limit, Time::ZERO),
+            quota: SendQuota::unstarted(self.settings.upload_rate_limit),
             settings: self.settings,
             storage,
             state: Some(self.state),
