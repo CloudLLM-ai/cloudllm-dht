@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  verify:
+    # cloudllm_dht is portable Rust with no platform-specific code; Linux and macOS
+    # are the platforms CI covers.
+    # macOS uses the Intel image: hosted arm64 Mac runners are
+    # capacity-constrained, and a job waiting for one is cancelled after 15
+    # minutes without running.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Check
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-features --locked
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --all-features --no-deps --locked
+
+  msrv:
+    # Guards the rust-version claim in Cargo.toml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.88 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.88 check --all-targets --all-features --locked
+
+  fuzz:
+    # Builds every fuzz target and replays the committed corpora: seconds, and
+    # it catches harness rot and regressions on old findings. Time-boxed
+    # fuzzing runs in fuzz.yml. Needs nightly, so it stays out of `verify`.
+    runs-on: ubuntu-latest
+    env:
+      # The fuzz crate is not part of the stable gates; -D warnings from the
+      # workflow env would fail the nightly build on dependency lints.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Cache cargo-fuzz
+        id: cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-0.13.2
+      - name: Install cargo-fuzz
+        if: steps.cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: make fuzz-build
+      - run: make fuzz-replay

@@ -1,0 +1,14 @@
+UNRELEASED
+
+  - feat(bencode): bencode decoder and encoder ported from libtorrent
+    (bdecode.cpp, entry.cpp). Same depth/token/buffer limits, same error
+    codes and error positions, soft errors (unsorted or duplicate keys,
+    leading zeros), partial trees after a failed parse, and zero-copy nodes
+    whose data_section is the exact source bytes (BEP 44 signs those).
+    All 79 TEST_CASEs of test_bdecode.cpp that have a Rust counterpart are
+    ported; a cargo-fuzz target checks decode/encode invariants.
+
+  - chore(repo): CI (fmt, clippy -D warnings, tests on ubuntu and macos,
+    rustdoc -D warnings, MSRV 1.88, fuzz build and corpus replay), weekly
+    fuzz workflow, Makefile and the shared engineering skills, mirroring
+    mentischat. BSD-3-Clause with libtorrent's notice retained.

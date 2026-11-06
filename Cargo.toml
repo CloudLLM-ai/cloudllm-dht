@@ -1,0 +1,28 @@
+[package]
+name = "cloudllm_dht"
+version = "0.1.0"
+edition = "2021"
+description = "Mainline DHT (BEP 5, 32, 33, 42, 43, 44, 51) as a sans-IO Rust library, ported from libtorrent's Kademlia implementation."
+license = "BSD-3-Clause"
+repository = "https://github.com/CloudLLM-ai/cloudllm-dht"
+homepage = "https://github.com/CloudLLM-ai/cloudllm-dht"
+documentation = "https://docs.rs/cloudllm_dht"
+readme = "README.md"
+keywords = ["dht", "kademlia", "bittorrent", "p2p", "bep44"]
+categories = ["network-programming", "algorithms"]
+rust-version = "1.88"
+exclude = ["/target", "/.github", "/fuzz", "/skills"]
+
+[features]
+default = []
+# The thin tokio UDP driver over the sans-IO core (work package 4).
+tokio-driver = ["dep:tokio"]
+
+[dependencies]
+crc32c = "0.6"
+getrandom = "0.3"
+sha1 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["net", "time", "rt", "sync"], optional = true }
+
+[dev-dependencies]

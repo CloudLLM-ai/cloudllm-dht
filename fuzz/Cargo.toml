@@ -1,0 +1,24 @@
+[package]
+name = "cloudllm_dht-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cloudllm_dht = { path = ".." }
+
+# Its own workspace: keeps the fuzz crate out of the parent package's builds,
+# clippy runs, MSRV check and published tarball.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "bdecode"
+path = "fuzz_targets/bdecode.rs"
+test = false
+doc = false
+bench = false

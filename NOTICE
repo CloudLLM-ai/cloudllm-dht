@@ -1,0 +1,17 @@
+cloudllm_dht
+Copyright (c) 2026 CloudLLM-ai contributors
+
+This product includes software derived from libtorrent
+(https://github.com/arvidn/libtorrent, branch RC_2_1), BSD-3-Clause,
+Copyright (c) 2003-2022, Arvid Norberg and contributors. See LICENSE.
+
+Ported from libtorrent: src/kademlia/*, include/libtorrent/kademlia/*,
+src/bdecode.cpp, src/entry.cpp, and the tests test/test_dht.cpp,
+test_dht_storage.cpp, test_direct_dht.cpp, test_dos_blocker.cpp,
+test_bdecode.cpp, test_ed25519.cpp (the C++ is not vendored; the port is a
+fresh Rust implementation that follows the same algorithms and the same
+test cases). Per-module provenance (file and commit) is recorded in each
+module's rustdoc and in docs/PORTING.md.
+
+libtorrent's own ed25519 implementation (Orson Peters, zlib license) is not
+ported: this crate uses the ed25519-dalek crate (BSD-3-Clause) instead.
