@@ -373,6 +373,33 @@ impl Item {
         ))
     }
 
+    /// Replaces the contents with an immutable value copied from a decoded
+    /// node (libtorrent `assign(bdecode_node const&)`).
+    pub fn assign_immutable(&mut self, v: &Node<'_>) {
+        *self = Self::immutable_from_node(v);
+    }
+
+    /// Replaces the contents with a mutable item after verifying its
+    /// signature (libtorrent `bool assign(bdecode_node, salt, seq, pk,
+    /// sig)`). Returns `false`, leaving `self` unchanged, when verification
+    /// fails or `v` exceeds [`MAX_VALUE_SIZE`].
+    pub fn assign_mutable(
+        &mut self,
+        v: &Node<'_>,
+        salt: &[u8],
+        seq: SequenceNumber,
+        pk: &PublicKey,
+        sig: &Signature,
+    ) -> bool {
+        match Self::from_signed_node(v, salt, seq, pk, sig) {
+            Ok(item) => {
+                *self = item;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Resets to an empty value (libtorrent `clear()`, which only resets the
     /// value, leaving key, salt and sequence number as they were).
     pub fn clear(&mut self) {

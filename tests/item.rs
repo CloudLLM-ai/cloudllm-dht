@@ -273,3 +273,21 @@ fn test_item_constructors_and_clear() {
     assert!(m.is_mutable());
     assert_eq!(m.seq(), SequenceNumber(3));
 }
+
+/// `assign_immutable` and `assign_mutable` replace in place; a failed
+/// verification leaves the item untouched.
+#[test]
+fn test_item_in_place_assign() {
+    let (pk, sk) = test_keypair();
+    let wire = Entry::from("Hello World!").encode();
+    let node = decode(&wire).unwrap();
+    let sig = sign_mutable_item(&wire, b"s", SequenceNumber(1), &pk, &sk);
+    let mut item = Item::for_key(pk, b"s");
+    assert!(!item.assign_mutable(&node, b"s", SequenceNumber(2), &pk, &sig));
+    assert!(item.is_empty());
+    assert!(item.assign_mutable(&node, b"s", SequenceNumber(1), &pk, &sig));
+    assert_eq!(item.seq(), SequenceNumber(1));
+    item.assign_immutable(&node);
+    assert!(!item.is_mutable());
+    assert_eq!(item.value(), &Entry::from("Hello World!"));
+}
