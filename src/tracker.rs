@@ -933,6 +933,15 @@ impl Dht {
         }
     }
 
+    /// Starts a bootstrap on every node, seeded with `seeds` (libtorrent
+    /// `node::bootstrap`, which `dht_tracker::start` runs from the saved
+    /// state). Each node's completion produces an [`Event::BootstrapDone`].
+    pub fn bootstrap(&mut self, seeds: &[SocketAddr], now: Time) {
+        for idx in 0..self.nodes.len() {
+            self.with_node(idx, now, |node, env| node.bootstrap(env, seeds, true));
+        }
+    }
+
     /// Pings `ep` from every node of its family and adds it to the table if
     /// it answers (libtorrent `add_node`).
     pub fn add_node(&mut self, ep: SocketAddr, now: Time) {

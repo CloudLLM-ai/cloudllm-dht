@@ -25,7 +25,7 @@ getrandom = "0.3"
 sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["net", "time", "rt", "sync"], optional = true }
+tokio = { version = "1", features = ["net", "time", "rt", "sync", "macros"], optional = true }
 
 [dev-dependencies]
 # Differential tests only: the production code uses curve25519-dalek directly so it can match libtorrent's
