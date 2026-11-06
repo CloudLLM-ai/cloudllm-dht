@@ -162,6 +162,14 @@ impl Algorithm {
         self.initialized
     }
 
+    /// Appends an observer to the end of the result list without sorting it
+    /// (libtorrent's `m_results.push_back` in `put_data::set_targets`, where
+    /// the nodes are already the chosen targets). The list takes over the
+    /// caller's reference to the observer.
+    pub fn push_unsorted(&mut self, oid: ObserverId) {
+        self.results.push(oid);
+    }
+
     /// Stops issuing new requests; the ones in flight still complete
     /// (`traversal_algorithm::abort`).
     pub fn abort(&mut self) {

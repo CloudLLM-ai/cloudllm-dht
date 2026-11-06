@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::bencode::Entry;
+use crate::item::Item;
 use crate::node_id::NodeId;
 
 /// Something a lookup or request produced, for the owner of the node to act
@@ -103,6 +104,31 @@ pub enum Event {
         samples: Vec<NodeId>,
         /// Nodes it suggests we sample next (its `nodes`/`nodes6`).
         nodes: Vec<(NodeId, SocketAddr)>,
+    },
+    /// A BEP 44 lookup produced an item (the data callback of libtorrent's
+    /// `get_item`). For an immutable item it fires once, when the item is
+    /// found (`authoritative` is `true`). For a mutable item it fires
+    /// whenever a higher sequence number turns up (`authoritative` is
+    /// `false`: a better one may still arrive) and once more when the lookup
+    /// completes (`authoritative` is `true`, and `item` is empty if nobody
+    /// had it).
+    GetItemDone {
+        /// What was looked up: the SHA-1 of the value, or of key and salt.
+        target: NodeId,
+        /// The best item found so far.
+        item: Item,
+        /// `true` once the lookup is complete.
+        authoritative: bool,
+    },
+    /// A BEP 44 put finished (the `put_callback` of libtorrent's
+    /// `put_data`).
+    PutDone {
+        /// The target the item is stored under.
+        target: NodeId,
+        /// The item that was written.
+        item: Item,
+        /// How many nodes acknowledged the write.
+        responses: usize,
     },
     /// The answer to a direct request (libtorrent
     /// `direct_traversal::message_callback`). `reply` is `None` when the

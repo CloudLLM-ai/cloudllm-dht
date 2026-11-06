@@ -30,6 +30,7 @@ use super::algorithm::{
     add_entry, base_done, base_start, observer_done, observer_timeout, traversal_observer_reply,
     Algorithm,
 };
+use super::put_data::PutData;
 use super::Traversal;
 
 /// A node that answered, with the write token it gave us (one element of
@@ -67,6 +68,9 @@ pub enum NodesCallback {
     Bootstrap,
     /// Send `announce_peer` to each node (`node.cpp` `announce_fun`).
     Announce(AnnounceArgs),
+    /// Start the `put` phase of a BEP 44 put on these nodes (`node.cpp`
+    /// `put`).
+    Put(Box<PutData>),
 }
 
 /// The state `find_data` adds to the base algorithm.
@@ -154,6 +158,10 @@ pub fn done<T: HasFindData + ?Sized>(t: &mut T, ctx: &mut NodeCtx<'_>) {
         NodesCallback::None => {}
         NodesCallback::Bootstrap => ctx.events.push(Event::BootstrapDone),
         NodesCallback::Announce(args) => announce_peer(ctx, &args, &results),
+        NodesCallback::Put(mut put) => {
+            put.set_targets(ctx, &results);
+            ctx.spawn(put);
+        }
     }
     base_done(t, ctx);
 }
