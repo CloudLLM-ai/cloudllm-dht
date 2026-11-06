@@ -58,3 +58,10 @@ path = "fuzz_targets/storage_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "traversal_replies"
+path = "fuzz_targets/traversal_replies.rs"
+test = false
+doc = false
+bench = false
