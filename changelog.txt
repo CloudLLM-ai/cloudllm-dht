@@ -23,6 +23,25 @@ UNRELEASED
     node-id formats, tolerant loader), the BEP 33 bloom filter with the
     BEP 33 test vectors, and the announce flags.
 
+  - fix(routing_table): two libtorrent bugs fixed in the port. (1) After
+    splitting the last bucket, add_node erased the new bucket when it held
+    no live node, even if it held replacements; those nodes were lost and
+    their addresses stayed in the IP set forever, so with
+    restrict_routing_ips such an IP could never be added again (found by
+    the routing_table_ops fuzzer). (2) depth() cached -1 when first called
+    on an empty table and returned it forever, so node::tick re-bootstrapped
+    every ten minutes for good; depth() now recovers once nodes arrive.
+
+  - feat(routing_table): the Kademlia routing table and node entries ported
+    from libtorrent (routing_table.cpp, node_entry.cpp): buckets with
+    replacement caches, splitting, the extended first buckets, prefix-slot
+    spreading (classify_prefix, replace_node_impl), BEP 42 verified-node
+    preference, one-node-per-IP and /24 (/64) restrictions, router nodes,
+    IP filter hook, refresh scheduling, find_node, set_id, status and
+    print_state. All 14 routing-table TEST_CASEs of test_dht.cpp are
+    ported (60 tests), plus a routing_table_ops fuzz target that checks the
+    structural invariants after every operation of an arbitrary sequence.
+
   - feat(foundation): the shared modules every work package builds on:
     Sha1Hash/NodeId with the XOR metric and distance_exp; BEP 42 ID
     generation and verification (crc32c; the five BEP 42 reference vectors
