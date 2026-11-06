@@ -989,7 +989,7 @@ fn obfuscated_world() -> (World, Vec<(NodeId, SocketAddr)>) {
 }
 
 /// A privacy lookup first asks about a target that shares only the leading
-/// bits with the real one: the prefix shared with the node plus four (see
+/// bits with the real one: the prefix shared with the node plus three (see
 /// `obfuscate`).
 #[test]
 fn test_obfuscated_get_peers_hides_the_target() {
@@ -1011,9 +1011,9 @@ fn test_obfuscated_get_peers_hides_the_target() {
                 r
             })
             .sum::<usize>();
-        // the bits we reveal (see `obfuscate`: libtorrent's distance_exp is
-        // 159 - clz, so that is the shared prefix + 4), never more than 160
-        let revealed = (shared + 4).min(160);
+        // the bits we reveal (shared prefix + 3; libtorrent reveals 4), never
+        // more than 160
+        let revealed = (shared + 3).min(160);
         let first_diff_bit = sent
             .iter()
             .zip(target.0.iter())
@@ -1357,4 +1357,29 @@ fn test_direct_dht_request_error_response() {
             reply: None
         }]
     );
+}
+
+/// libtorrent bug, fixed: the obfuscated target agrees with the real one for
+/// exactly the shared prefix plus 3 bits (libtorrent leaks a fourth). With a
+/// random ID that is the bitwise complement of the target, the first
+/// differing bit is the first hidden one.
+#[test]
+fn test_obfuscate_reveals_exactly_shared_prefix_plus_three_bits() {
+    use cloudllm_dht::traversal::get_peers::obfuscate;
+    let target = to_hash("a5c3000000000000000000000000000000000001");
+    let mut inverse = target;
+    for b in &mut inverse.0 {
+        *b = !*b;
+    }
+    for shared in [0usize, 1, 7, 8, 9, 40, 100, 150] {
+        // a node id that shares exactly `shared` leading bits
+        let mut node = target;
+        node.0[shared / 8] ^= 0x80 >> (shared % 8);
+        let out = obfuscate(&target, &node, inverse);
+        assert_eq!(
+            (out ^ target).leading_zeros() as usize,
+            shared + 3,
+            "shared {shared}"
+        );
+    }
 }

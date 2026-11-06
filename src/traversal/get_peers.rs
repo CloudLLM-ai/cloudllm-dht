@@ -38,7 +38,7 @@ use crate::bencode::{Entry, Node, NodeKind};
 use crate::ctx::NodeCtx;
 use crate::events::Event;
 use crate::net::{read_endpoint, read_endpoint_list, Protocol};
-use crate::node_id::{distance_exp, generate_prefix_mask, generate_random_id, NodeId};
+use crate::node_id::{generate_prefix_mask, generate_random_id, NodeId};
 use crate::observer::{ObserverFlags, ObserverId, ObserverKind};
 
 use super::algorithm::{
@@ -218,12 +218,14 @@ impl GetPeers {
 }
 
 /// The ID sent in an obfuscated query: `target` for the first
-/// `160 - distance_exp(node, target) + 3` bits, `random` after that.
+/// `shared + 3` bits, `random` after that, where `shared` is the number of
+/// leading bits `node` and `target` have in common.
 ///
-/// libtorrent's `distance_exp` is `159 - leading_zeros`, so the number of
-/// bits revealed is the common prefix with the node *plus four*, not three
-/// (and all 160 once the node is as close as it gets). The source comment
-/// says "shared prefix + 3"; the arithmetic is kept as written.
+/// libtorrent computes `shared` as `160 - distance_exp(node, target)`, which
+/// is one too many (`distance_exp` is `159 - leading_zeros`), so it reveals
+/// four bits past the prefix although its comment says three. This port
+/// reveals three. Other nodes only ever see the result as a random-looking
+/// ID, so this is interoperable; see `docs/PORTING.md`.
 ///
 /// # Examples
 ///
@@ -236,12 +238,12 @@ impl GetPeers {
 /// let random = Sha1Hash([0x00; 20]);
 /// assert_eq!(obfuscate(&target, &node, random), target);
 ///
-/// let far = Sha1Hash([0x00; 20]); // shares no bits: 4 are revealed
-/// assert_eq!(obfuscate(&target, &far, random).0[0], 0b1111_0000);
+/// let far = Sha1Hash([0x00; 20]); // shares no bits: 3 are revealed
+/// assert_eq!(obfuscate(&target, &far, random).0[0], 0b1110_0000);
 /// ```
 #[must_use]
 pub fn obfuscate(target: &NodeId, node: &NodeId, random: NodeId) -> NodeId {
-    let shared_prefix = usize::try_from(160 - distance_exp(node, target)).unwrap_or(0);
+    let shared_prefix = (*node ^ *target).leading_zeros() as usize;
     let mask = generate_prefix_mask(shared_prefix + 3);
     let mut out = [0u8; 20];
     for (i, o) in out.iter_mut().enumerate() {
