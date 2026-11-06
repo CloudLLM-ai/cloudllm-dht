@@ -18,7 +18,7 @@
 //! # Why this is built on `curve25519-dalek` and not `ed25519-dalek`
 //!
 //! `ed25519-dalek`'s `hazmat::ExpandedSecretKey::from_bytes` *re-clamps* the
-//! scalar half, which breaks keys produced by [`add_scalar`] (their scalar is
+//! scalar half, which breaks keys produced by [`add_scalar_secret`] (their scalar is
 //! `a + n mod l`, deliberately not clamped); its `raw_sign` demands a valid
 //! `VerifyingKey`, whereas libtorrent signs with whatever 32 bytes the
 //! caller supplies; and its `verify` rejects non-canonical `S` while
