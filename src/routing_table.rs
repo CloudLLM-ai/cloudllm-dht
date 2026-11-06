@@ -52,6 +52,13 @@
 //!   recomputes; `node::tick` calls `depth()` before the first node is
 //!   added, so a node would re-bootstrap itself every ten minutes for good.
 //!   Regression test: `test_depth_recovers_after_empty_table`.
+//! * After splitting the last bucket, `add_node` drops the new bucket again
+//!   only if it holds no live node *and* no replacement. libtorrent checks
+//!   the live nodes alone, so a new bucket holding only replacements was
+//!   erased with them while their addresses stayed in the IP set for good
+//!   (with `restrict_routing_ips`, those IPs could never be added again).
+//!   Found by the `routing_table_ops` fuzz target; regression test
+//!   `test_split_does_not_drop_a_new_bucket_holding_only_replacements`.
 //! * The `dht_logger` messages are not ported; the decisions they report are
 //!   visible through the return values and [`RoutingTable::write_state`].
 
@@ -285,9 +292,6 @@ pub enum InvariantError {
         /// The offending node.
         id: NodeId,
     },
-    /// The last bucket is empty (it should have been pruned).
-    #[error("the last bucket is empty")]
-    EmptyLastBucket,
 }
 
 /// Where a node lives inside the table.
@@ -983,7 +987,7 @@ impl RoutingTable {
             return Vec::new();
         }
         let first = self.bucket_index_for(target);
-        let mut found = Vec::with_capacity(self.bucket_limit(first));
+        let mut found = Vec::with_capacity(count.min(self.bucket_limit(first)));
         // First the target's bucket and the (closer) ones after it, then the
         // (farther) ones before it.
         let order = (first..self.buckets.len()).chain((0..first).rev());
@@ -1176,9 +1180,10 @@ impl RoutingTable {
             }
             let status = self.add_node_impl(e, now);
             // If nothing, not even `e`, ended up in the new bucket, drop it.
-            if self.buckets.last().is_some_and(|b| b.live_nodes.is_empty()) {
-                self.buckets.pop();
-            }
+            // libtorrent only checks the live nodes here, so a new bucket that
+            // holds nothing but replacements is erased together with them and
+            // their addresses stay in the IP set for good; see the module docs.
+            self.prune_empty_bucket();
             match status {
                 AddNodeStatus::FailedToAdd => return false,
                 AddNodeStatus::NodeAdded => return true,
@@ -1502,8 +1507,8 @@ impl RoutingTable {
     /// Verifies the structural invariants of the table (libtorrent's
     /// `check_invariant`, extended): every live node was pinged, the IP set
     /// matches the stored nodes, every node is in the bucket its ID belongs
-    /// to, no node has our ID or the wrong family, and the last bucket is not
-    /// empty.
+    /// to, and no node has our ID or the wrong family. (An empty last bucket is
+    /// allowed: libtorrent's `node_failed` can leave one behind.)
     ///
     /// Meant for tests and fuzzing; `O(n)`.
     ///
@@ -1537,12 +1542,7 @@ impl RoutingTable {
         if all_ips != self.ips {
             return Err(InvariantError::IpSetMismatch);
         }
-        match self.buckets.last() {
-            Some(b) if b.live_nodes.is_empty() && b.replacements.is_empty() => {
-                Err(InvariantError::EmptyLastBucket)
-            }
-            _ => Ok(()),
-        }
+        Ok(())
     }
 
     /// Writes a human-readable dump of the table: per-bucket populations,
