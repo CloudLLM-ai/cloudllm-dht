@@ -151,3 +151,30 @@ fn test_rate_limit_accrue_limit() {
         assert!(q.remaining() <= i64::from(i32::MAX));
     }
 }
+
+/// Ports `TEST_CASE(dht_tracker_ip_filter)`: a datagram from a blocked
+/// address is dropped and counted, the same message from another address is
+/// answered.
+#[test]
+fn test_dht_tracker_ip_filter() {
+    use cloudllm_dht::settings::DhtSettings;
+    use cloudllm_dht::testing::ep;
+    use cloudllm_dht::tracker::Dht;
+    use std::sync::Arc;
+
+    let now = t(1_000_000);
+    let mut dht = Dht::builder(DhtSettings::default())
+        .rng(Box::new(cloudllm_dht::rng::TestRng::new(1)))
+        .build();
+    dht.set_ip_filter(Some(Arc::new(|ip| ip == addr4("4.4.4.4"))));
+    let sock = dht.add_socket(ep("10.0.0.1", 6881), None, now);
+    let msg: &[u8] = b"d1:ad2:id20:aaaaaaaaaaaaaaaaaaaae1:q4:ping1:t2:aa1:y1:qe";
+
+    let before = dht.counters().messages_in_dropped;
+    dht.incoming_packet(sock, ep("4.4.4.4", 4), msg, now);
+    assert_eq!(dht.counters().messages_in_dropped, before + 1);
+    assert!(dht.poll_transmit().is_none());
+
+    dht.incoming_packet(sock, ep("4.4.4.5", 4), msg, now);
+    assert!(dht.poll_transmit().is_some());
+}

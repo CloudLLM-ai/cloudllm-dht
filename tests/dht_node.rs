@@ -1124,3 +1124,50 @@ mod put_errors {
         assert_eq!(rd.dict_find_string_value(b"sig", b""), &sig.0);
     }
 }
+
+mod ip_filter {
+    //! `dht_ip_filter` and `dht_node_add_node_ip_filter`.
+
+    use super::*;
+    use std::sync::Arc;
+
+    fn block_4444() -> Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>> {
+        Some(Arc::new(|ip| ip == cloudllm_dht::testing::addr4("4.4.4.4")))
+    }
+
+    /// Ports `TEST_CASE(dht_ip_filter)` at node level: a query from a
+    /// blocked address is not added to the table, one from another address
+    /// is, and without the filter the blocked address is let through.
+    #[test]
+    fn test_dht_ip_filter() {
+        let mut t = Fixture::new(ep("10.0.0.1", 20));
+        t.set_ip_filter(block_4444());
+        // use nodes from unrelated /24s so restrict_routing_ips stays out
+        t.request_from("ping", ep("4.4.4.4", 4), &MsgArgs::new())
+            .expect("answered");
+        assert_eq!(t.node.size().1, 0, "blocked address not added");
+        t.request_from("ping", ep("5.5.5.5", 4), &MsgArgs::new())
+            .expect("answered");
+        assert_eq!(t.node.size().1, 1);
+        t.set_ip_filter(None);
+        t.request_from("ping", ep("4.4.4.4", 4), &MsgArgs::new())
+            .expect("answered");
+        assert_eq!(t.node.size().1, 2);
+    }
+
+    /// Ports `TEST_CASE(dht_node_add_node_ip_filter)`: `add_node` does not
+    /// ping a blocked address.
+    #[test]
+    fn test_dht_node_add_node_ip_filter() {
+        let mut t = Fixture::new(ep("10.0.0.1", 20));
+        t.set_ip_filter(block_4444());
+        t.with_env(|n, env| n.add_node(env, ep("4.4.4.4", 4)));
+        assert!(t.sock.sent.is_empty());
+        t.with_env(|n, env| n.add_node(env, ep("5.5.5.5", 4)));
+        assert_eq!(t.sock.sent.len(), 1);
+        t.sock.clear();
+        t.set_ip_filter(None);
+        t.with_env(|n, env| n.add_node(env, ep("4.4.4.4", 4)));
+        assert_eq!(t.sock.sent.len(), 1);
+    }
+}

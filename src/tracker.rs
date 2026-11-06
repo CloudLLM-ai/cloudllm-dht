@@ -494,7 +494,7 @@ pub struct Dht {
     running: bool,
     next_key_refresh: Option<Time>,
     next_refresh: Option<Time>,
-    ip_filter: Option<Box<IpFilterFn>>,
+    ip_filter: Option<Arc<IpFilterFn>>,
     hook: Option<Box<RequestHookFn>>,
     counters: TrackerCounters,
     next_socket: u32,
@@ -538,7 +538,12 @@ impl Dht {
     /// whose datagrams are dropped and which are never added to a table or
     /// contacted by a lookup (libtorrent `apply_filter_to_dht` with the
     /// session's `ip_filter`).
-    pub fn set_ip_filter(&mut self, blocked: Option<Box<IpFilterFn>>) {
+    pub fn set_ip_filter(&mut self, blocked: Option<Arc<IpFilterFn>>) {
+        for slot in &mut self.nodes {
+            if let Some(n) = slot.node.as_mut() {
+                n.table_mut().set_ip_filter(blocked.clone());
+            }
+        }
         self.ip_filter = blocked;
     }
 

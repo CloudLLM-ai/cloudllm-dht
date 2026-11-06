@@ -57,6 +57,8 @@ pub struct Fixture {
     pub clock: ManualClock,
     /// The default sender of [`Fixture::request`].
     pub source: SocketAddr,
+    /// Blocks addresses (libtorrent's `ip_filter` with `apply_filter_to_dht`).
+    pub ip_filter: Option<std::sync::Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
     /// Called for every query, may take over the response.
     pub hook: Option<Box<TestHook>>,
 }
@@ -88,7 +90,18 @@ impl Fixture {
             clock,
             source,
             hook: None,
+            ip_filter: None,
         }
+    }
+
+    /// Installs a filter on the node's table and on lookups, like the
+    /// tracker does.
+    pub fn set_ip_filter(
+        &mut self,
+        blocked: Option<std::sync::Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    ) {
+        self.node.table_mut().set_ip_filter(blocked.clone());
+        self.ip_filter = blocked;
     }
 
     /// Runs `f` with the node and an environment built from the fixture.
@@ -110,6 +123,7 @@ impl Fixture {
             rng,
             clock,
             hook,
+            ip_filter,
             ..
         } = self;
         let hook_ref: Option<&mut RequestHook<'_>> = match hook {
@@ -124,7 +138,9 @@ impl Fixture {
             events,
             foreign,
             hook: hook_ref,
-            ip_filter: None,
+            ip_filter: ip_filter
+                .as_deref()
+                .map(|f| -> &dyn Fn(std::net::IpAddr) -> bool { f }),
         };
         f(node, &mut env)
     }
