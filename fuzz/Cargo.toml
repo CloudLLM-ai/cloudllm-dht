@@ -37,3 +37,10 @@ path = "fuzz_targets/routing_table_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "state_load"
+path = "fuzz_targets/state_load.rs"
+test = false
+doc = false
+bench = false
