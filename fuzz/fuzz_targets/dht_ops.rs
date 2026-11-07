@@ -241,18 +241,35 @@ fuzz_target!(|data: &[u8]| {
         }
         assert!(net.flight.len() <= MAX_QUEUE);
     }
-    // drain: deliver everything and let timeouts run
-    for _ in 0..400 {
-        while !net.flight.is_empty() && net.flight.len() < MAX_QUEUE {
+    // Drain: deliver everything and let timeouts run. Every step is
+    // counted so a drain that does not terminate fails with a message
+    // instead of hanging the fuzzer.
+    const MAX_DELIVERIES: usize = 300_000;
+    const MAX_ROUNDS: usize = 600;
+    let mut deliveries = 0usize;
+    let mut rounds = 0usize;
+    loop {
+        while !net.flight.is_empty() {
             net.deliver(0, false, false);
-            if net.dut.operations_in_flight() == 0 && net.flight.len() > 2000 {
-                break;
-            }
+            deliveries += 1;
+            assert!(
+                deliveries <= MAX_DELIVERIES,
+                "drain did not terminate: {deliveries} deliveries, {} in flight, {} operations running",
+                net.flight.len(),
+                net.dut.operations_in_flight()
+            );
         }
-        net.advance(5_000);
         if net.dut.operations_in_flight() == 0 {
             break;
         }
+        net.advance(5_000);
+        rounds += 1;
+        assert!(
+            rounds <= MAX_ROUNDS,
+            "{} operations still running after {rounds} clock steps ({} s) with no traffic",
+            net.dut.operations_in_flight(),
+            rounds * 5
+        );
     }
     net.dut.shutdown(net.now);
     net.collect();
