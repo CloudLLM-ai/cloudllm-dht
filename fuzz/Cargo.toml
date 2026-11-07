@@ -72,3 +72,10 @@ path = "fuzz_targets/node_incoming.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dht_ops"
+path = "fuzz_targets/dht_ops.rs"
+test = false
+doc = false
+bench = false
