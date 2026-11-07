@@ -1,5 +1,13 @@
 UNRELEASED
 
+  - feat(tracker,driver): every operation of a Dht (peer lookups, announce,
+    bootstrap, sample_infohashes, direct requests and the BEP 44 gets and
+    puts) has an OpId, tags its results and ends exactly once with
+    OperationDone or OperationCancelled; concurrent same-target operations
+    never merge. DhtHandle's calls complete when their operation does
+    (lookup_peers keeps its timeout as an upper bound). The dht_ops fuzz
+    target covers every kind.
+
   - feat(node,tracker,driver): the DHT node and its owner. Node: write
     tokens with rotating secrets, ping/find_node/get_peers/announce_peer/
     get/put/sample_infohashes handlers with libtorrent's error strings,

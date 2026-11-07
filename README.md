@@ -47,6 +47,16 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+Every operation completes: `lookup_peers` returns when the lookup finishes
+(its timeout is only an upper bound), `get_peers` returns a stream that ends
+with the lookup, `announce`, `bootstrap`, `sample_infohashes`,
+`direct_request` and the BEP 44 calls resolve when they are done, or to
+`None` if the DHT shut down first. With the sans-IO `tracker::Dht` each
+operation returns an `OpId`; its results arrive as `Event::Operation { op,
+result }` and it ends exactly once with `Event::OperationDone { op }` (or
+`Event::OperationCancelled { op }` on shutdown or socket removal), so
+concurrent operations on one target never mix.
+
 `DhtHandle` also offers `announce`, `get_mutable`/`put_mutable` (BEP 44 with
 salt and compare-and-swap through the data callback), `sample_infohashes`
 (BEP 51), `direct_request`, and `events()` for a stream of everything the
