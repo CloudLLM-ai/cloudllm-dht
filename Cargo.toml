@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["net", "time", "rt", "sync", "macros"], opt
 [dev-dependencies]
 # Differential tests only: the production code uses curve25519-dalek directly so it can match libtorrent's
 # verification and signing edge cases exactly (see src/ed25519.rs).
-ed25519-dalek = { version = "2", default-features = false, features = ["hazmat"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["hazmat"] }
 # Benchmarks (benches/): `cargo bench`.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
