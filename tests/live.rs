@@ -76,7 +76,7 @@ async fn live_bep44_roundtrip() {
     let (target, acks) = dht.put_immutable(v.clone()).await.expect("put finished");
     println!("immutable put {target} acknowledged by {acks} nodes");
     assert!(acks > 0, "no node accepted the immutable put");
-    assert_eq!(dht.get_immutable(target).await, Some(v));
+    assert_eq!(dht.get_immutable(target).await, Ok(Some(v)));
 
     let (pk, sk) = create_keypair(&create_seed(&mut SystemRng));
     let salt = b"cloudllm_dht";
@@ -87,6 +87,10 @@ async fn live_bep44_roundtrip() {
     let acks = dht.put_mutable(pk, salt, cb).await.expect("put finished");
     println!("mutable put acknowledged by {acks} nodes");
     assert!(acks > 0, "no node accepted the mutable put");
-    let item = dht.get_mutable(pk, salt).await.expect("item found");
+    let item = dht
+        .get_mutable(pk, salt)
+        .await
+        .expect("no error")
+        .expect("item found");
     assert_eq!(item.value(), &Entry::from("live mutable"));
 }

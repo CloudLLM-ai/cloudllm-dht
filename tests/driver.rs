@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use cloudllm_dht::announce_flags::AnnounceFlags;
 use cloudllm_dht::bencode::Entry;
-use cloudllm_dht::driver::DhtHandle;
+use cloudllm_dht::driver::{DhtHandle, OpError};
 use cloudllm_dht::ed25519::create_keypair;
 use cloudllm_dht::item::Item;
 use cloudllm_dht::settings::DhtSettings;
@@ -18,6 +18,10 @@ use cloudllm_dht::Sha1Hash;
 fn settings() -> DhtSettings {
     DhtSettings {
         restrict_routing_ips: false,
+        // all test nodes share 127.0.0.1, which the per-IP DoS blocker would
+        // treat as one chatty peer (libtorrent's own simulations switch the
+        // blocker off the same way)
+        block_ratelimit: 1_000_000,
         ..DhtSettings::default()
     }
 }
@@ -37,7 +41,8 @@ async fn swarm() -> Vec<DhtHandle> {
         let n = node().await;
         tokio::time::timeout(Duration::from_secs(20), n.bootstrap_endpoints(vec![seed]))
             .await
-            .expect("bootstrap finishes");
+            .expect("bootstrap finishes")
+            .expect("bootstrap accepted");
         all.push(n);
     }
     all
@@ -51,7 +56,7 @@ async fn test_driver_immutable_roundtrip() {
     let (target, acks) = nodes[1].put_immutable(v.clone()).await.expect("put done");
     assert!(acks >= 1, "acknowledged by {acks}");
     let got = nodes[2].get_immutable(target).await;
-    assert_eq!(got, Some(v));
+    assert_eq!(got, Ok(Some(v)));
 }
 
 /// A mutable item round-trips and a newer sequence number replaces it.
@@ -67,7 +72,11 @@ async fn test_driver_mutable_roundtrip() {
         let acks = nodes[1].put_mutable(pk, b"s", cb).await.expect("put done");
         assert!(acks >= 1);
     }
-    let item = nodes[2].get_mutable(pk, b"s").await.expect("found");
+    let item = nodes[2]
+        .get_mutable(pk, b"s")
+        .await
+        .expect("no error")
+        .expect("found");
     assert_eq!(item.value(), &Entry::from("second"));
     assert_eq!(item.seq(), SequenceNumber(2));
 }
@@ -78,7 +87,7 @@ async fn test_driver_announce_and_get_peers() {
     let nodes = swarm().await;
     let ih = Sha1Hash([9; 20]);
     let found = nodes[1].announce(ih, 4242, AnnounceFlags::EMPTY).await;
-    assert!(found.is_some(), "the announce completed");
+    assert!(found.is_ok(), "the announce completed");
     let peers = nodes[2].lookup_peers(ih, Duration::from_secs(2)).await;
     assert!(peers.iter().any(|p| p.port() == 4242), "peers: {peers:?}");
 }
@@ -95,6 +104,7 @@ async fn test_driver_state_and_direct_request() {
     let r = nodes[1]
         .direct_request(nodes[0].local_addrs()[0], ping)
         .await
+        .expect("no error")
         .expect("answered");
     assert_eq!(r.get("y"), Some(&Entry::from("r")));
 }
@@ -110,8 +120,8 @@ async fn test_driver_concurrent_same_target_operations() {
         nodes[2].get_immutable(target),
         nodes[2].get_immutable(target)
     );
-    assert_eq!(a, Some(v.clone()));
-    assert_eq!(b, Some(v));
+    assert_eq!(a, Ok(Some(v.clone())));
+    assert_eq!(b, Ok(Some(v)));
 
     let (pk, sk) = create_keypair(&[9u8; 32]);
     let cb = |text: &'static str| {
@@ -124,12 +134,12 @@ async fn test_driver_concurrent_same_target_operations() {
         nodes[1].put_mutable(pk, b"c", cb("first")),
         nodes[1].put_mutable(pk, b"c", cb("second"))
     );
-    assert!(p1.is_some_and(|n| n >= 1) && p2.is_some_and(|n| n >= 1));
+    assert!(p1.is_ok_and(|n| n >= 1) && p2.is_ok_and(|n| n >= 1));
     let (m1, m2) = tokio::join!(
         nodes[2].get_mutable(pk, b"c"),
         nodes[2].get_mutable(pk, b"c")
     );
-    let (m1, m2) = (m1.expect("found"), m2.expect("found"));
+    let (m1, m2) = (m1.unwrap().expect("found"), m2.unwrap().expect("found"));
     assert_eq!(m1.seq(), SequenceNumber(2));
     assert_eq!(m2.value(), &Entry::from("second"));
 }
@@ -147,7 +157,9 @@ async fn test_driver_shutdown_resolves_pending_requests() {
         .await
         .expect("resolved after shutdown")
         .expect("task ok");
-    assert_eq!(r, None);
+    // an aborted lookup reports what it has (nothing); anything that
+    // cannot finish is cancelled
+    assert!(matches!(r, Ok(None) | Err(OpError::Cancelled)), "{r:?}");
 }
 
 /// `lookup_peers` returns as soon as the lookup has finished, well before
@@ -179,7 +191,7 @@ async fn test_driver_sample_and_direct_complete() {
     let s = nodes[1]
         .sample_infohashes(nodes[0].local_addrs()[0], Sha1Hash([1; 20]))
         .await;
-    assert!(s.is_some(), "a sample came back");
+    assert!(matches!(s, Ok(Some(_))), "a sample came back");
     let mut ping = Entry::dict();
     ping.set("q", "ping");
     let silent: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
@@ -189,5 +201,37 @@ async fn test_driver_sample_and_direct_complete() {
     )
     .await
     .expect("resolved");
-    assert_eq!(r, None);
+    assert_eq!(r, Ok(None));
+}
+
+/// Far more queued puts of one slot than the cap allows: the surplus gets
+/// `OpError::QueueFull`, the rest complete. (The commands reach the driver
+/// task in one burst, long before the first put can finish.)
+#[tokio::test]
+async fn test_driver_put_queue_overflow_is_an_error() {
+    let nodes = swarm().await;
+    let (pk, sk) = create_keypair(&[5u8; 32]);
+    let handles: Vec<_> = (0..300)
+        .map(|_| {
+            let h = nodes[1].clone();
+            tokio::spawn(async move {
+                let cb = Arc::new(move |i: &mut Item| {
+                    let seq = SequenceNumber(i.seq().0.max(0) + 1);
+                    *i = Item::signed(Entry::from("q"), b"", seq, &pk, &sk).expect("small item");
+                });
+                h.put_mutable(pk, b"", cb).await
+            })
+        })
+        .collect();
+    let mut full = 0;
+    let mut ok = 0;
+    for h in handles {
+        match h.await.expect("task") {
+            Err(OpError::QueueFull) => full += 1,
+            Ok(_) => ok += 1,
+            Err(e) => panic!("unexpected {e}"),
+        }
+    }
+    assert!(full >= 200, "rejected {full}, completed {ok}");
+    assert!((1..=100).contains(&ok), "completed {ok}");
 }

@@ -20,6 +20,13 @@
 //! Samples of one endpoint run one at a time, because replies can arrive in
 //! any order and a reply names no request.
 //!
+//! # Bounds
+//!
+//! Every queue here is bounded ([`MAX_QUEUED_PUTS_PER_SLOT`],
+//! [`MAX_QUEUED_SAMPLES_PER_ENDPOINT`], [`MAX_OPERATIONS_PER_TARGET`],
+//! [`MAX_OPERATIONS_IN_FLIGHT`]). An operation that does not fit is ended at
+//! once with [`Event::OperationRejected`], having done nothing.
+//!
 //! # Why this is not a straight port
 //!
 //! libtorrent hands each operation its own `std::function`, so two
@@ -43,10 +50,27 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::bencode::Entry;
-use crate::events::{Event, OpId};
+use crate::events::{Event, OpId, RejectReason};
 use crate::item::Item;
 use crate::node_id::NodeId;
 use crate::types::PublicKey;
+
+/// The most puts that may wait behind the running one for the same slot
+/// (a BEP 44 target). Puts of one slot run one at a time, so this bounds how
+/// long the last one can wait; a further put is rejected with
+/// [`RejectReason::QueueFull`].
+pub const MAX_QUEUED_PUTS_PER_SLOT: usize = 64;
+
+/// The most samples that may wait behind the running one for the same
+/// endpoint.
+pub const MAX_QUEUED_SAMPLES_PER_ENDPOINT: usize = 16;
+
+/// The most operations that may share one target: coalesced gets of an
+/// item, concurrent peer lookups of an info-hash.
+pub const MAX_OPERATIONS_PER_TARGET: usize = 64;
+
+/// The most operations of all kinds a tracker runs at once.
+pub const MAX_OPERATIONS_IN_FLIGHT: usize = 4096;
 
 /// What a queued put writes.
 pub(crate) enum PutKind {
@@ -135,7 +159,24 @@ fn tagged(op: OpId, result: Event) -> Event {
     }
 }
 
+fn rejected(op: OpId, out: &mut VecDeque<Event>) {
+    out.push_back(Event::OperationRejected {
+        op,
+        reason: RejectReason::QueueFull,
+    });
+}
+
 impl Aggregator {
+    /// `true` (and the rejection queued) when the tracker already runs the
+    /// maximum number of operations.
+    fn at_capacity(&self, op: OpId, out: &mut VecDeque<Event>) -> bool {
+        if self.in_flight() >= MAX_OPERATIONS_IN_FLIGHT {
+            rejected(op, out);
+            return true;
+        }
+        false
+    }
+
     /// A fresh operation id.
     pub fn new_op(&mut self) -> OpId {
         self.next_op += 1;
@@ -175,7 +216,14 @@ impl Aggregator {
             out.push_back(Event::OperationDone { op });
             return false;
         }
+        if self.at_capacity(op, out) {
+            return false;
+        }
         if let Some(g) = self.immutable_gets.get_mut(&target) {
+            if g.posted.is_none() && g.ops.len() >= MAX_OPERATIONS_PER_TARGET {
+                rejected(op, out);
+                return false;
+            }
             match &g.posted {
                 Some(item) => {
                     out.push_back(tagged(op, found(target, item.clone())));
@@ -208,7 +256,14 @@ impl Aggregator {
             out.push_back(Event::OperationDone { op });
             return false;
         }
+        if self.at_capacity(op, out) {
+            return false;
+        }
         if let Some(g) = self.mutable_gets.get_mut(&target) {
+            if g.ops.len() >= MAX_OPERATIONS_PER_TARGET {
+                rejected(op, out);
+                return false;
+            }
             g.ops.push(op);
             return false;
         }
@@ -238,7 +293,14 @@ impl Aggregator {
             out.push_back(Event::OperationDone { op: job.op });
             return;
         }
+        if self.at_capacity(job.op, out) {
+            return;
+        }
         let lane = self.lanes.entry(job.target).or_default();
+        if lane.current.is_some() && lane.waiting.len() >= MAX_QUEUED_PUTS_PER_SLOT {
+            rejected(job.op, out);
+            return;
+        }
         if lane.current.is_none() {
             lane.current = Some(Running {
                 op: job.op,
@@ -304,27 +366,37 @@ impl Aggregator {
     }
 
     /// Registers a task running on `running` nodes. With none it is done at
-    /// once.
+    /// once; if a bound is hit it is rejected. Returns `true` when the task
+    /// was registered and the caller should start it.
     pub fn start_task(
         &mut self,
         op: OpId,
         running: usize,
         kind: TaskKind,
         out: &mut VecDeque<Event>,
-    ) {
+    ) -> bool {
         if running == 0 {
             out.push_back(Event::OperationDone { op });
-            return;
+            return false;
         }
-        self.tasks.insert(op, running);
+        if self.at_capacity(op, out) {
+            return false;
+        }
         match kind {
-            TaskKind::Peers(target) => self
-                .peer_ops
-                .entry(target)
-                .or_default()
-                .push((op, HashSet::new())),
+            TaskKind::Peers(target) => {
+                let ops = self.peer_ops.entry(target).or_default();
+                if ops.len() >= MAX_OPERATIONS_PER_TARGET {
+                    rejected(op, out);
+                    return false;
+                }
+                ops.push((op, HashSet::new()));
+            }
             TaskKind::Sample(ep, target) => {
                 let lane = self.sample_lanes.entry(ep).or_default();
+                if lane.current.is_some() && lane.waiting.len() >= MAX_QUEUED_SAMPLES_PER_ENDPOINT {
+                    rejected(op, out);
+                    return false;
+                }
                 if lane.current.is_none() {
                     lane.current = Some(op);
                     self.samples_to_start.push((op, ep, target));
@@ -334,6 +406,8 @@ impl Aggregator {
             }
             TaskKind::Plain => {}
         }
+        self.tasks.insert(op, running);
+        true
     }
 
     fn peers_reply(&mut self, target: NodeId, peers: Vec<SocketAddr>, out: &mut VecDeque<Event>) {

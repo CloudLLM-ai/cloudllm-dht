@@ -51,7 +51,23 @@ use crate::types::PublicKey;
 /// libtorrent reads 1300 bytes.
 const RECV_BUFFER: usize = 2048;
 
-type Reply<T> = oneshot::Sender<T>;
+/// Why a [`DhtHandle`] operation did not produce its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum OpError {
+    /// The DHT shut down (or its socket was removed) before the operation
+    /// finished.
+    #[error("the DHT shut down before the operation finished")]
+    Cancelled,
+    /// A bounded queue was full: too many operations in flight, too many
+    /// queued puts for one slot or samples for one endpoint, or too many
+    /// operations on one target (see `cloudllm_dht::tracker`'s limits).
+    /// Nothing was started; retry later.
+    #[error("too many operations in flight; the request was rejected")]
+    QueueFull,
+}
+
+type Reply<T> = oneshot::Sender<Result<T, OpError>>;
 
 /// What a handle asks the task to do.
 enum Command {
@@ -98,7 +114,7 @@ enum Command {
         request: Entry,
         reply: Reply<Option<Entry>>,
     },
-    State(Reply<DhtState>),
+    State(oneshot::Sender<DhtState>),
     Shutdown,
 }
 
@@ -196,10 +212,10 @@ impl DhtHandle {
         let _ = self.cmd.send(c);
     }
 
-    async fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Option<T> {
+    async fn ask<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, OpError> {
         let (tx, rx) = oneshot::channel();
         self.send(make(tx));
-        rx.await.ok()
+        rx.await.unwrap_or(Err(OpError::Cancelled))
     }
 
     /// Resolves `routers` (`host:port` strings, for example
@@ -223,13 +239,18 @@ impl DhtHandle {
             return Err(last_err
                 .unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no routers")));
         }
-        self.bootstrap_endpoints(eps).await;
-        Ok(())
+        self.bootstrap_endpoints(eps)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// [`DhtHandle::bootstrap`] with resolved endpoints.
-    pub async fn bootstrap_endpoints(&self, routers: Vec<SocketAddr>) {
-        let _ = self.ask(|done| Command::Bootstrap { routers, done }).await;
+    ///
+    /// # Errors
+    ///
+    /// [`OpError`] if the request was rejected or the DHT shut down first.
+    pub async fn bootstrap_endpoints(&self, routers: Vec<SocketAddr>) -> Result<(), OpError> {
+        self.ask(|done| Command::Bootstrap { routers, done }).await
     }
 
     /// Starts a `get_peers` lookup and returns the stream of peers as nodes
@@ -268,7 +289,7 @@ impl DhtHandle {
         info_hash: NodeId,
         port: u16,
         flags: AnnounceFlags,
-    ) -> Option<Vec<SocketAddr>> {
+    ) -> Result<Vec<SocketAddr>, OpError> {
         self.ask(|reply| Command::Announce {
             info_hash,
             port,
@@ -279,24 +300,22 @@ impl DhtHandle {
     }
 
     /// Fetches an immutable item (BEP 44). `None` if nobody has it.
-    pub async fn get_immutable(&self, target: NodeId) -> Option<Entry> {
+    pub async fn get_immutable(&self, target: NodeId) -> Result<Option<Entry>, OpError> {
         self.ask(|reply| Command::GetImmutable { target, reply })
             .await
-            .flatten()
     }
 
     /// Fetches the best mutable item (BEP 44) for `pk` and `salt`. `None`
     /// if nobody has one.
-    pub async fn get_mutable(&self, pk: PublicKey, salt: &[u8]) -> Option<Item> {
+    pub async fn get_mutable(&self, pk: PublicKey, salt: &[u8]) -> Result<Option<Item>, OpError> {
         let salt = salt.to_vec();
         self.ask(|reply| Command::GetMutable { pk, salt, reply })
             .await
-            .flatten()
     }
 
     /// Stores an immutable item; returns its target and how many nodes
     /// acknowledged.
-    pub async fn put_immutable(&self, data: Entry) -> Option<(NodeId, usize)> {
+    pub async fn put_immutable(&self, data: Entry) -> Result<(NodeId, usize), OpError> {
         self.ask(|reply| Command::PutImmutable { data, reply })
             .await
     }
@@ -310,7 +329,7 @@ impl DhtHandle {
         pk: PublicKey,
         salt: &[u8],
         data_cb: Arc<dyn Fn(&mut Item) + Send + Sync>,
-    ) -> Option<usize> {
+    ) -> Result<usize, OpError> {
         let salt = salt.to_vec();
         self.ask(|reply| Command::PutMutable {
             pk,
@@ -322,24 +341,32 @@ impl DhtHandle {
     }
 
     /// Asks `ep` for a BEP 51 sample of its info-hashes.
-    pub async fn sample_infohashes(&self, ep: SocketAddr, target: NodeId) -> Option<SampleReply> {
+    pub async fn sample_infohashes(
+        &self,
+        ep: SocketAddr,
+        target: NodeId,
+    ) -> Result<Option<SampleReply>, OpError> {
         self.ask(|reply| Command::Sample { ep, target, reply })
             .await
-            .flatten()
     }
 
     /// Sends an arbitrary request to `ep` and returns the reply dictionary,
     /// or `None` if it timed out.
-    pub async fn direct_request(&self, ep: SocketAddr, request: Entry) -> Option<Entry> {
+    pub async fn direct_request(
+        &self,
+        ep: SocketAddr,
+        request: Entry,
+    ) -> Result<Option<Entry>, OpError> {
         self.ask(|reply| Command::Direct { ep, request, reply })
             .await
-            .flatten()
     }
 
     /// The state to persist (`DhtState::encode`): node IDs and routing-table
     /// endpoints.
     pub async fn save_state(&self) -> Option<DhtState> {
-        self.ask(Command::State).await
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::State(tx));
+        rx.await.ok()
     }
 
     /// Stops the task; pending requests resolve to `None`.
@@ -375,10 +402,10 @@ impl Pending {
                 ..
             } => {
                 if let Some(r) = self.immutable.remove(&op) {
-                    let _ = r.send((!item.is_empty()).then(|| item.value().clone()));
+                    let _ = r.send(Ok((!item.is_empty()).then(|| item.value().clone())));
                 }
                 if let Some(r) = self.mutable.remove(&op) {
-                    let _ = r.send((!item.is_empty()).then(|| item.clone()));
+                    let _ = r.send(Ok((!item.is_empty()).then(|| item.clone())));
                 }
             }
             Event::GetPeersReply { peers, .. } => {
@@ -416,10 +443,10 @@ impl Pending {
                 target, responses, ..
             } => match self.puts.remove(&op) {
                 Some(PutWaiter::Immutable(r)) => {
-                    let _ = r.send((*target, *responses));
+                    let _ = r.send(Ok((*target, *responses)));
                 }
                 Some(PutWaiter::Mutable(r)) => {
-                    let _ = r.send(*responses);
+                    let _ = r.send(Ok(*responses));
                 }
                 None => {}
             },
@@ -432,7 +459,7 @@ impl Pending {
             Event::Operation { op, result } => self.resolve_op(*op, result),
             Event::OperationDone { op } => self.finish(*op),
             Event::OperationCancelled { op } => {
-                // dropping the senders makes the callers see `None`
+                // dropping the senders makes the callers see `Cancelled`
                 self.immutable.remove(op);
                 self.mutable.remove(op);
                 self.puts.remove(op);
@@ -442,8 +469,42 @@ impl Pending {
                 self.direct.remove(op);
                 self.bootstrap.remove(op);
             }
+            Event::OperationRejected { op, .. } => self.reject(*op),
             _ => {}
         }
+    }
+
+    /// The operation was refused at the start: its caller gets
+    /// [`OpError::QueueFull`] (a peer stream just ends).
+    fn reject(&mut self, op: OpId) {
+        if let Some(r) = self.immutable.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        if let Some(r) = self.mutable.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        match self.puts.remove(&op) {
+            Some(PutWaiter::Immutable(r)) => {
+                let _ = r.send(Err(OpError::QueueFull));
+            }
+            Some(PutWaiter::Mutable(r)) => {
+                let _ = r.send(Err(OpError::QueueFull));
+            }
+            None => {}
+        }
+        if let Some((_, r)) = self.announces.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        if let Some((_, r)) = self.samples.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        if let Some((_, r)) = self.direct.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        if let Some(r) = self.bootstrap.remove(&op) {
+            let _ = r.send(Err(OpError::QueueFull));
+        }
+        self.peers.remove(&op);
     }
 
     /// The operation is complete: answer what collects until the end.
@@ -451,16 +512,16 @@ impl Pending {
         // closing the sink ends the caller's stream
         self.peers.remove(&op);
         if let Some((peers, r)) = self.announces.remove(&op) {
-            let _ = r.send(peers);
+            let _ = r.send(Ok(peers));
         }
         if let Some((reply, r)) = self.samples.remove(&op) {
-            let _ = r.send(reply);
+            let _ = r.send(Ok(reply));
         }
         if let Some((reply, r)) = self.direct.remove(&op) {
-            let _ = r.send(reply);
+            let _ = r.send(Ok(reply));
         }
         if let Some(r) = self.bootstrap.remove(&op) {
-            let _ = r.send(());
+            let _ = r.send(Ok(()));
         }
         // BEP 44 callers were answered by their result; one that was not
         // (no result, which does not happen) sees `None`

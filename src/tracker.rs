@@ -62,7 +62,7 @@ use crate::time::Time;
 use crate::transport::Transport;
 use crate::types::PublicKey;
 
-mod ops;
+pub mod ops;
 pub mod prefilter;
 pub mod quota;
 
@@ -890,9 +890,10 @@ impl Dht {
     pub fn get_peers(&mut self, info_hash: NodeId, now: Time) -> OpId {
         let op = self.agg.new_op();
         let n = self.nodes.len();
-        self.agg
+        let admitted = self
+            .agg
             .start_task(op, n, TaskKind::Peers(info_hash), &mut self.events);
-        for idx in 0..n {
+        for idx in (0..n).filter(|_| admitted) {
             self.with_node(idx, now, |node, env| {
                 node.get_peers(env, info_hash, AnnounceFlags::EMPTY, Some(op.0));
             });
@@ -916,9 +917,10 @@ impl Dht {
     ) -> OpId {
         let op = self.agg.new_op();
         let n = self.nodes.len();
-        self.agg
+        let admitted = self
+            .agg
             .start_task(op, n, TaskKind::Peers(info_hash), &mut self.events);
-        for idx in 0..n {
+        for idx in (0..n).filter(|_| admitted) {
             let port = if listen_port == 0 {
                 self.nodes[idx].local.port()
             } else {
@@ -1027,7 +1029,7 @@ impl Dht {
     pub fn sample_infohashes(&mut self, ep: SocketAddr, target: NodeId, now: Time) -> OpId {
         let op = self.agg.new_op();
         let idx = self.node_index_for(ep);
-        self.agg.start_task(
+        let _ = self.agg.start_task(
             op,
             usize::from(idx.is_some()),
             TaskKind::Sample(ep, target),
@@ -1057,11 +1059,14 @@ impl Dht {
             self.events.push_back(Event::OperationDone { op });
             return op;
         };
-        self.agg
-            .start_task(op, 1, TaskKind::Plain, &mut self.events);
-        self.with_node(idx, now, |node, env| {
-            node.direct_request(env, ep, request, op.0, Some(op.0));
-        });
+        if self
+            .agg
+            .start_task(op, 1, TaskKind::Plain, &mut self.events)
+        {
+            self.with_node(idx, now, |node, env| {
+                node.direct_request(env, ep, request, op.0, Some(op.0));
+            });
+        }
         op
     }
 

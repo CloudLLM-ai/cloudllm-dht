@@ -65,6 +65,14 @@ pub enum Event {
         /// The operation.
         op: OpId,
     },
+    /// The operation was refused at the start because one of the tracker's
+    /// bounded queues was full; it did nothing and ends here, exactly once.
+    OperationRejected {
+        /// The operation.
+        op: OpId,
+        /// Which limit it hit.
+        reason: RejectReason,
+    },
     /// A result of a tracker-level operation, tagged with the operation it
     /// answers. `result` is the aggregated [`Event::GetItemDone`] (a mutable
     /// get may produce several, the last one authoritative) or
@@ -178,18 +186,31 @@ pub enum Event {
     },
 }
 
+/// Why a `Dht` refused to start an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RejectReason {
+    /// A bounded queue is full: too many operations in flight overall, too
+    /// many queued puts for one slot or samples for one endpoint, or too
+    /// many operations sharing one target. See the constants in
+    /// `cloudllm_dht::tracker::ops`.
+    QueueFull,
+}
+
 /// Identifies one operation started on a `Dht` (a BEP 44 get or put). Ids
 /// are unique within a tracker and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpId(pub u64);
 
 impl Event {
-    /// `true` for the two events that end an operation.
+    /// `true` for the events that end an operation: done, rejected, cancelled.
     #[must_use]
     pub fn ends_operation(&self) -> bool {
         matches!(
             self,
-            Self::OperationDone { .. } | Self::OperationCancelled { .. }
+            Self::OperationDone { .. }
+                | Self::OperationRejected { .. }
+                | Self::OperationCancelled { .. }
         )
     }
 
@@ -200,6 +221,7 @@ impl Event {
         match self {
             Self::Operation { op, .. }
             | Self::OperationDone { op }
+            | Self::OperationRejected { op, .. }
             | Self::OperationCancelled { op } => Some(*op),
             _ => None,
         }

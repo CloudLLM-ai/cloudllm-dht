@@ -744,3 +744,131 @@ fn test_sim_dht_lookups_never_query_ourselves() {
     );
     assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
 }
+
+/// Counts the events of each ending kind for `ops`.
+fn endings(events: &[Event], ops: &[OpId]) -> (usize, usize, usize) {
+    let mut done = 0;
+    let mut rejected = 0;
+    let mut cancelled = 0;
+    for op in ops {
+        let ends: Vec<_> = events
+            .iter()
+            .filter(|e| e.ends_operation() && e.op() == Some(*op))
+            .collect();
+        assert_eq!(ends.len(), 1, "{op:?} ends exactly once: {ends:?}");
+        match ends[0] {
+            Event::OperationDone { .. } => done += 1,
+            Event::OperationRejected { .. } => rejected += 1,
+            _ => cancelled += 1,
+        }
+    }
+    (done, rejected, cancelled)
+}
+
+/// A dht whose only known node is a silent router, so nothing completes on
+/// its own and queues fill up.
+fn stalled_dht() -> (Dht, Time) {
+    let now = Time::ZERO + Duration::from_secs(1000);
+    let mut dht = Dht::builder(net_settings())
+        .rng(Box::new(TestRng::new(1)))
+        .build();
+    dht.add_socket(ep("10.0.0.1", 6881), None, now);
+    dht.add_router_node(ep("40.1.1.1", 1));
+    (dht, now)
+}
+
+/// Puts of one slot beyond the running one and `MAX_QUEUED_PUTS_PER_SLOT`
+/// waiting ones are rejected at once, each ending exactly once.
+#[test]
+fn test_sim_dht_put_queue_is_bounded() {
+    use cloudllm_dht::ed25519::create_keypair;
+    use cloudllm_dht::item::Item;
+    use cloudllm_dht::tracker::ops::MAX_QUEUED_PUTS_PER_SLOT;
+    use std::sync::Arc;
+
+    let (mut dht, now) = stalled_dht();
+    let (pk, _) = create_keypair(&[1u8; 32]);
+    let total = MAX_QUEUED_PUTS_PER_SLOT + 11;
+    let ops: Vec<OpId> = (0..total)
+        .map(|_| dht.put_mutable_item(pk, b"", Arc::new(|_: &mut Item| {}), now))
+        .collect();
+    let events = dht.drain_events();
+    let rejected: Vec<OpId> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::OperationRejected { op, reason } => {
+                assert_eq!(*reason, cloudllm_dht::events::RejectReason::QueueFull);
+                Some(*op)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rejected,
+        ops[1 + MAX_QUEUED_PUTS_PER_SLOT..],
+        "the latecomers"
+    );
+    assert_eq!(dht.operations_in_flight(), 1 + MAX_QUEUED_PUTS_PER_SLOT);
+    // a put of another slot is unaffected
+    let (pk2, _) = create_keypair(&[2u8; 32]);
+    dht.put_mutable_item(pk2, b"", Arc::new(|_: &mut Item| {}), now);
+    assert_eq!(
+        dht.drain_events()
+            .iter()
+            .filter(|e| matches!(e, Event::OperationRejected { .. }))
+            .count(),
+        0
+    );
+    dht.shutdown(now);
+    let events = dht.drain_events();
+    assert_eq!(dht.operations_in_flight(), 0);
+    // everything accepted ends at shutdown (done or cancelled)
+    let accepted = &ops[..=MAX_QUEUED_PUTS_PER_SLOT];
+    let (done, rej, cancelled) = endings(&events, accepted);
+    assert_eq!((rej, done + cancelled), (0, accepted.len()));
+}
+
+/// Samples of one endpoint and peer lookups of one info-hash are bounded the
+/// same way.
+#[test]
+fn test_sim_dht_sample_and_target_queues_are_bounded() {
+    use cloudllm_dht::tracker::ops::{MAX_OPERATIONS_PER_TARGET, MAX_QUEUED_SAMPLES_PER_ENDPOINT};
+    let (mut dht, now) = stalled_dht();
+    let target = ep("40.1.1.1", 1);
+    let samples: Vec<OpId> = (0..MAX_QUEUED_SAMPLES_PER_ENDPOINT + 5)
+        .map(|_| dht.sample_infohashes(target, Sha1Hash([1; 20]), now))
+        .collect();
+    let lookups: Vec<OpId> = (0..MAX_OPERATIONS_PER_TARGET + 5)
+        .map(|_| dht.get_peers(Sha1Hash([2; 20]), now))
+        .collect();
+    let events = dht.drain_events();
+    let rejected = |ops: &[OpId]| {
+        ops.iter()
+            .filter(|op| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::OperationRejected { op: o, .. } if o == *op))
+            })
+            .count()
+    };
+    // one sample runs and MAX_QUEUED_SAMPLES_PER_ENDPOINT wait; peer
+    // lookups of one info-hash are capped at MAX_OPERATIONS_PER_TARGET
+    assert_eq!(rejected(&samples), 4);
+    assert_eq!(rejected(&lookups), 5);
+}
+
+/// The overall limit on operations in flight.
+#[test]
+fn test_sim_dht_total_operations_are_bounded() {
+    use cloudllm_dht::tracker::ops::MAX_OPERATIONS_IN_FLIGHT;
+    let (mut dht, now) = stalled_dht();
+    let mut ping = Entry::dict();
+    ping.set("q", "ping");
+    let ops: Vec<OpId> = (0..MAX_OPERATIONS_IN_FLIGHT + 10)
+        .map(|_| dht.direct_request(ep("40.1.1.1", 1), ping.clone(), now))
+        .collect();
+    assert_eq!(dht.operations_in_flight(), MAX_OPERATIONS_IN_FLIGHT);
+    let events = dht.drain_events();
+    let (done, rejected, cancelled) = endings(&events, &ops[MAX_OPERATIONS_IN_FLIGHT..]);
+    assert_eq!((done, rejected, cancelled), (0, 10, 0));
+}
