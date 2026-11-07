@@ -1,4 +1,4 @@
-UNRELEASED
+0.1.0 (2026-11-07)
 
   - feat(tracker,driver): every queue of a Dht is bounded (64 queued puts per
     slot, 16 queued samples per endpoint, 64 operations per target, 4096 in

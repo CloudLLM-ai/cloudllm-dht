@@ -13,6 +13,10 @@ categories = ["network-programming", "algorithms"]
 rust-version = "1.88"
 exclude = ["/target", "/.github", "/fuzz", "/skills"]
 
+# docs.rs documents the tokio driver too.
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 # The thin tokio UDP driver over the sans-IO core (work package 4).
