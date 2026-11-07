@@ -1,0 +1,25 @@
+# Weekly pull requests for Cargo dependencies and for the actions used by the
+# workflows. Updates arrive as pull requests and run the full CI before anyone
+# merges them. See docs/ENGINEERING.md.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Patch and minor updates arrive as one pull request; majors stay separate
+    # because they are the ones that need reading.
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

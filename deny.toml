@@ -1,0 +1,48 @@
+# cargo-deny policy for cloudllm_dht. Run locally with `make deny`; CI runs the
+# same command in .github/workflows/audit.yml. docs/ENGINEERING.md explains
+# every section and how to change it.
+
+[graph]
+# Check every platform and every feature: a dependency that only builds on
+# macOS, or only behind `e2e`, still ships.
+all-features = true
+
+[advisories]
+# RustSec database, fetched at run time. A new advisory against a locked
+# dependency fails the job, which is the point of the daily schedule.
+version = 2
+yanked = "deny"
+# Unmaintained crates are reported for every dependency, direct or transitive.
+unmaintained = "all"
+# Each ignore carries the advisory ID and the reason it cannot hurt us. Remove
+# an entry the day the dependency is upgraded past the advisory.
+ignore = []
+
+[licenses]
+version = 2
+# Everything the dependency tree uses today, nothing more (BSD-3-Clause is the crate's own). Adding a license is
+# a decision for a human: copyleft needs a look at what linking it implies.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate bloat the binary and double the audit surface, but
+# most are forced by upstream pins. Warn, so a new duplicate is visible in the
+# job log without blocking; `multiple-versions = "deny"` once the list is short.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# Crates come from crates.io only. A git or alternate-registry dependency has
+# to be added here on purpose.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
