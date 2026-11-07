@@ -196,7 +196,8 @@ fn obs_mut<'c>(ctx: &'c mut NodeCtx<'_>, id: ObserverId) -> &'c mut Observer {
 /// A node with an all-zero `id` has an unknown ID: it gets a random
 /// placeholder, [`ObserverFlags::NO_ID`], and goes to the unsorted tail.
 /// Otherwise it is inserted in distance order unless a node with that ID is
-/// already listed, or (with `restrict_search_ips`, and unless `flags`
+/// already listed, it is not the node's own ID (a lookup never queries its
+/// own node), or (with `restrict_search_ips`, and unless `flags`
 /// contains [`ObserverFlags::INITIAL`]) another node from the same /24 (/64
 /// for IPv6) is already listed. Does nothing once the lookup is done.
 /// Keeps the list to [`MAX_RESULTS`], cancelling the requests of the
@@ -218,6 +219,12 @@ pub fn add_entry<T: Traversal + ?Sized>(
         ob.flags |= ObserverFlags::NO_ID;
         let oid = ctx.rpc.observers.insert(ob);
         t.algo_mut().results.push(oid);
+    } else if id == ctx.id {
+        // Never ask ourselves. Other nodes list us in their replies
+        // whenever we are among the closest to the target; libtorrent adds
+        // that entry and queries itself, which loops the request back
+        // through the DoS blocker and slows every lookup down.
+        return;
     } else if !insert_sorted(t, ctx, ob, flags) {
         return;
     }

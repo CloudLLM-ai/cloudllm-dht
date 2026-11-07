@@ -684,3 +684,63 @@ fn test_sim_dht_queued_puts_of_one_slot_all_complete_in_order() {
     assert_eq!(finished, ops, "all puts end once, in the order started");
     assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
 }
+
+/// Regression test for the self-queries behind the `dht_ops` finding
+/// `crash-fc57aea…`: other nodes list *us* in their `nodes` replies (we are
+/// often among the closest to a target), and a lookup used to add that entry
+/// and query itself. Every such request was answered from our own address,
+/// fed the DoS blocker, and made puts crawl. A lookup must never contact
+/// the node's own ID.
+#[test]
+fn test_sim_dht_lookups_never_query_ourselves() {
+    use cloudllm_dht::ed25519::create_keypair;
+    use cloudllm_dht::item::Item;
+    use cloudllm_dht::types::SequenceNumber;
+    use std::sync::Arc;
+
+    let mut sim = SimNet::new(10);
+    let (net, routers4) = build_network(&mut sim, 12, false, 101);
+    let (me, socks) = session(&mut sim, &routers4, &[], 1000);
+    let (my_id, my_addr) = {
+        let n = sim.peers[me].dht.node(socks[0]).unwrap();
+        (n.nid(), sim.peers[me].addrs[0].1)
+    };
+    let now = sim.now();
+    // every network node knows us and will report us in `nodes`
+    for i in net {
+        let (sid, _) = sim.peers[i].addrs[0];
+        sim.peers[i]
+            .dht
+            .node_mut(sid)
+            .unwrap()
+            .table_mut()
+            .node_seen(my_id, my_addr, 10, now);
+    }
+    sim.run_for(Duration::from_secs(2));
+    let (pk, sk) = create_keypair(&[4u8; 32]);
+    for round in 0..5 {
+        let now = sim.now();
+        let ih = Sha1Hash([round; 20]);
+        sim.peers[me].dht.get_peers(ih, now);
+        sim.peers[me].dht.get_immutable_item(ih, now);
+        let (pk, sk) = (pk, sk);
+        sim.peers[me].dht.put_mutable_item(
+            pk,
+            b"",
+            Arc::new(move |i: &mut Item| {
+                let seq = SequenceNumber(i.seq().0.max(0) + 1);
+                *i = Item::signed(Entry::from("v"), b"", seq, &pk, &sk).unwrap();
+            }),
+            now,
+        );
+        sim.poke(me);
+        sim.run_for(Duration::from_secs(20));
+    }
+    let n = sim.peers[me].dht.node_counters();
+    assert_eq!(
+        (n.get_in, n.put_in, n.get_peers_in, n.find_node_in),
+        (0, 0, 0, 0),
+        "we queried ourselves: {n:?}"
+    );
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
+}

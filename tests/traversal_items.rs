@@ -277,7 +277,7 @@ fn test_immutable_get_ignores_a_value_of_the_wrong_hash() {
     let mut w = World::v4();
     let its = items(&mut w);
     let node = ep("4.4.4.4", 1234);
-    w.table.add_node(Sha1Hash([0x11; 20]), node);
+    w.table.add_node(Sha1Hash([0x22; 20]), node);
     w.run(|ctx, trs| {
         let t = get_immutable(ctx, its[0].target);
         trs.spawn(ctx, t);
@@ -414,7 +414,7 @@ fn test_mutable_get_rejects_forged_answers() {
     ] {
         let mut w = World::v4();
         let node = ep("4.4.4.4", 1234);
-        w.table.add_node(Sha1Hash([0x11; 20]), node);
+        w.table.add_node(Sha1Hash([0x22; 20]), node);
         w.run(|ctx, trs| {
             let t = get_mutable(ctx, pk, b"");
             trs.spawn(ctx, t);

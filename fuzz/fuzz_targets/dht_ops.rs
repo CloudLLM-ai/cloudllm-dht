@@ -314,7 +314,12 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     if std::env::var_os("DHT_OPS_VERBOSE").is_some() {
-        eprintln!("drained in {rounds} rounds, {} ops", started.len());
+        eprintln!(
+            "drained in {rounds} rounds, {} ops, tracker {:?}, nodes {:?}",
+            started.len(),
+            net.dut.counters(),
+            net.dut.node_counters()
+        );
     }
     net.dut.shutdown(net.now);
     net.collect();
