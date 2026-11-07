@@ -39,7 +39,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::announce_flags::AnnounceFlags;
 use crate::bencode::Entry;
 use crate::dht_state::DhtState;
-use crate::events::Event;
+use crate::events::{Event, OpId};
 use crate::item::Item;
 use crate::node_id::NodeId;
 use crate::settings::DhtSettings;
@@ -341,9 +341,9 @@ impl DhtHandle {
 #[derive(Default)]
 struct Pending {
     peers: HashMap<NodeId, Vec<mpsc::UnboundedSender<Vec<SocketAddr>>>>,
-    immutable: HashMap<NodeId, Vec<Reply<Option<Entry>>>>,
-    mutable: HashMap<NodeId, Vec<Reply<Option<Item>>>>,
-    puts: HashMap<NodeId, Vec<PutWaiter>>,
+    immutable: HashMap<OpId, Reply<Option<Entry>>>,
+    mutable: HashMap<OpId, Reply<Option<Item>>>,
+    puts: HashMap<OpId, PutWaiter>,
     samples: HashMap<SocketAddr, Vec<Reply<Option<SampleReply>>>>,
     direct: HashMap<u64, Reply<Option<Entry>>>,
     bootstrap: Vec<(usize, Reply<()>)>,
@@ -355,6 +355,35 @@ enum PutWaiter {
 }
 
 impl Pending {
+    fn resolve_op(&mut self, op: OpId, result: &Event) {
+        match result {
+            Event::GetItemDone {
+                item,
+                authoritative: true,
+                ..
+            } => {
+                if let Some(r) = self.immutable.remove(&op) {
+                    let _ = r.send((!item.is_empty()).then(|| item.value().clone()));
+                }
+                if let Some(r) = self.mutable.remove(&op) {
+                    let _ = r.send((!item.is_empty()).then(|| item.clone()));
+                }
+            }
+            Event::PutDone {
+                target, responses, ..
+            } => match self.puts.remove(&op) {
+                Some(PutWaiter::Immutable(r)) => {
+                    let _ = r.send((*target, *responses));
+                }
+                Some(PutWaiter::Mutable(r)) => {
+                    let _ = r.send(*responses);
+                }
+                None => {}
+            },
+            _ => {}
+        }
+    }
+
     fn resolve(&mut self, ev: &Event) {
         match ev {
             Event::GetPeersReply { target, peers } => {
@@ -362,33 +391,12 @@ impl Pending {
                     v.retain(|s| s.send(peers.clone()).is_ok());
                 }
             }
-            Event::GetItemDone {
-                target,
-                item,
-                authoritative: true,
-            } => {
-                let value = (!item.is_empty()).then(|| item.value().clone());
-                for r in self.immutable.remove(target).into_iter().flatten() {
-                    let _ = r.send(value.clone());
-                }
-                let best = (!item.is_empty()).then(|| item.clone());
-                for r in self.mutable.remove(target).into_iter().flatten() {
-                    let _ = r.send(best.clone());
-                }
-            }
-            Event::PutDone {
-                target, responses, ..
-            } => {
-                for w in self.puts.remove(target).into_iter().flatten() {
-                    match w {
-                        PutWaiter::Immutable(r) => {
-                            let _ = r.send((*target, *responses));
-                        }
-                        PutWaiter::Mutable(r) => {
-                            let _ = r.send(*responses);
-                        }
-                    }
-                }
+            Event::Operation { op, result } => self.resolve_op(*op, result),
+            Event::OperationCancelled { op } => {
+                // dropping the senders makes the callers see `None`
+                self.immutable.remove(op);
+                self.mutable.remove(op);
+                self.puts.remove(op);
             }
             Event::SampleInfohashes {
                 from,
@@ -562,21 +570,16 @@ fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, token: &mut u64, now
             flags,
         } => dht.announce(info_hash, port, flags, now),
         Command::GetImmutable { target, reply } => {
-            pending.immutable.entry(target).or_default().push(reply);
-            dht.get_immutable_item(target, now);
+            let op = dht.get_immutable_item(target, now);
+            pending.immutable.insert(op, reply);
         }
         Command::GetMutable { pk, salt, reply } => {
-            let target = crate::item::item_target_id(&salt, &pk);
-            pending.mutable.entry(target).or_default().push(reply);
-            dht.get_mutable_item(pk, &salt, now);
+            let op = dht.get_mutable_item(pk, &salt, now);
+            pending.mutable.insert(op, reply);
         }
         Command::PutImmutable { data, reply } => {
-            let target = dht.put_immutable_item(data, now);
-            pending
-                .puts
-                .entry(target)
-                .or_default()
-                .push(PutWaiter::Immutable(reply));
+            let op = dht.put_immutable_item(data, now);
+            pending.puts.insert(op, PutWaiter::Immutable(reply));
         }
         Command::PutMutable {
             pk,
@@ -584,13 +587,8 @@ fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, token: &mut u64, now
             data_cb,
             reply,
         } => {
-            let target = crate::item::item_target_id(&salt, &pk);
-            pending
-                .puts
-                .entry(target)
-                .or_default()
-                .push(PutWaiter::Mutable(reply));
-            dht.put_mutable_item(pk, &salt, data_cb, now);
+            let op = dht.put_mutable_item(pk, &salt, data_cb, now);
+            pending.puts.insert(op, PutWaiter::Mutable(reply));
         }
         Command::Sample { ep, target, reply } => {
             pending.samples.entry(ep).or_default().push(reply);

@@ -36,7 +36,7 @@
 //! * Every outgoing message carries a `v` client tag; libtorrent's is
 //!   `LT` plus its version, ours is [`CLIENT_VERSION`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ use crate::announce_flags::AnnounceFlags;
 use crate::bencode::{decode_with_limits, Entry, NodeKind};
 use crate::dht_state::DhtState;
 use crate::dos_blocker::DosBlocker;
-use crate::events::Event;
+use crate::events::{Event, OpId};
 use crate::item::{immutable_item_target_id, Item};
 use crate::msg::Msg;
 use crate::net::Protocol;
@@ -62,9 +62,11 @@ use crate::time::Time;
 use crate::transport::Transport;
 use crate::types::PublicKey;
 
+mod ops;
 pub mod prefilter;
 pub mod quota;
 
+use ops::{Aggregator, PutJob, PutKind};
 use prefilter::{is_dark_internet, plausible_dht_datagram};
 use quota::SendQuota;
 
@@ -229,136 +231,6 @@ impl Transport for TrackerTransport<'_> {
             payload,
         });
         true
-    }
-}
-
-/// Combines the per-node results of an operation into one answer, the way
-/// `dht_tracker`'s `get_immutable_item_ctx`, `get_mutable_item_ctx` and
-/// `put_item_ctx` do: an operation runs once on every node, each node
-/// reports through its own [`Event`], and the tracker reports once.
-///
-/// Operations are correlated by target, so two simultaneous operations of
-/// the same kind on the same target share one slot (the later replaces the
-/// earlier's bookkeeping).
-#[derive(Default)]
-struct Aggregator {
-    immutable_gets: HashMap<NodeId, ImmutableGet>,
-    mutable_gets: HashMap<NodeId, MutableGet>,
-    puts: HashMap<NodeId, PendingPut>,
-}
-
-struct ImmutableGet {
-    active: usize,
-    posted: bool,
-}
-
-struct MutableGet {
-    active: usize,
-    best: Item,
-}
-
-struct PendingPut {
-    active: usize,
-    responses: usize,
-}
-
-impl Aggregator {
-    /// Moves `scratch` to `out`, folding the BEP 44 events of registered
-    /// operations; every other event passes through.
-    fn absorb(&mut self, scratch: &mut Vec<Event>, out: &mut VecDeque<Event>) {
-        for ev in scratch.drain(..) {
-            match ev {
-                Event::GetItemDone {
-                    target,
-                    item,
-                    authoritative,
-                } => self.get_done(target, item, authoritative, out),
-                Event::PutDone {
-                    target,
-                    item,
-                    responses,
-                } => self.put_done(target, item, responses, out),
-                other => out.push_back(other),
-            }
-        }
-    }
-
-    fn get_done(
-        &mut self,
-        target: NodeId,
-        item: Item,
-        authoritative: bool,
-        out: &mut VecDeque<Event>,
-    ) {
-        if let Some(c) = self.immutable_gets.get_mut(&target) {
-            c.active = c.active.saturating_sub(1);
-            if !c.posted && (!item.is_empty() || c.active == 0) {
-                c.posted = true;
-                out.push_back(Event::GetItemDone {
-                    target,
-                    item,
-                    authoritative: true,
-                });
-            }
-            if c.active == 0 {
-                self.immutable_gets.remove(&target);
-            }
-        } else if let Some(c) = self.mutable_gets.get_mut(&target) {
-            if authoritative {
-                c.active = c.active.saturating_sub(1);
-            }
-            let last = authoritative && c.active == 0;
-            let better = (c.best.is_empty() && !item.is_empty()) || c.best.seq() < item.seq();
-            if better {
-                c.best = item;
-            }
-            // libtorrent passes the last node's item on the final callback;
-            // the best one found is what a caller wants there.
-            if better || last {
-                out.push_back(Event::GetItemDone {
-                    target,
-                    item: c.best.clone(),
-                    authoritative: last,
-                });
-            }
-            if last {
-                self.mutable_gets.remove(&target);
-            }
-        } else {
-            out.push_back(Event::GetItemDone {
-                target,
-                item,
-                authoritative,
-            });
-        }
-    }
-
-    fn put_done(
-        &mut self,
-        target: NodeId,
-        item: Item,
-        responses: usize,
-        out: &mut VecDeque<Event>,
-    ) {
-        let Some(c) = self.puts.get_mut(&target) else {
-            out.push_back(Event::PutDone {
-                target,
-                item,
-                responses,
-            });
-            return;
-        };
-        c.responses += responses;
-        c.active = c.active.saturating_sub(1);
-        if c.active == 0 {
-            let total = c.responses;
-            self.puts.remove(&target);
-            out.push_back(Event::PutDone {
-                target,
-                item,
-                responses: total,
-            });
-        }
     }
 }
 
@@ -649,6 +521,7 @@ impl Dht {
             node: Some(node),
             next_timeout: None,
         });
+        self.agg.nodes = self.nodes.len();
         self.update_storage_node_ids();
         if self.running {
             let idx = self.nodes.len() - 1;
@@ -662,6 +535,10 @@ impl Dht {
     pub fn remove_socket(&mut self, socket: SocketId) {
         self.sockets.retain(|s| s.id != socket);
         self.nodes.retain(|s| s.socket != socket);
+        // operations were fanned out to the old set of nodes and can no
+        // longer complete
+        self.agg.cancel_all(&mut self.events);
+        self.agg.nodes = self.nodes.len();
         self.update_storage_node_ids();
     }
 
@@ -740,7 +617,31 @@ impl Dht {
         };
         nodes[idx].node = Some(node);
         agg.absorb(scratch, events);
+        if !self.agg.to_start.is_empty() {
+            self.start_queued_puts(now);
+        }
         Some(result)
+    }
+
+    /// Starts the puts whose turn has come on every node.
+    fn start_queued_puts(&mut self, now: Time) {
+        let jobs = std::mem::take(&mut self.agg.to_start);
+        for job in jobs {
+            for idx in 0..self.nodes.len() {
+                match &job.kind {
+                    PutKind::Immutable(data) => {
+                        let (t, d) = (job.target, data.clone());
+                        self.with_node(idx, now, |n, env| n.put_immutable(env, t, d));
+                    }
+                    PutKind::Mutable { pk, salt, cb } => {
+                        let (pk, cb) = (*pk, Arc::clone(cb));
+                        self.with_node(idx, now, |n, env| {
+                            n.put_mutable(env, pk, salt, Box::new(move |i| cb(i)));
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -776,6 +677,7 @@ impl Dht {
         for idx in 0..self.nodes.len() {
             self.with_node(idx, now, |node, env| node.shutdown(env));
         }
+        self.agg.cancel_all(&mut self.events);
     }
 
     /// Stops the timers (libtorrent `dht_tracker::stop`). Datagrams that
@@ -993,91 +895,91 @@ impl Dht {
         }
     }
 
-    /// Looks an immutable item up on every node; one
-    /// [`Event::GetItemDone`] arrives when an item is found, or an empty
-    /// one when every node came back empty-handed (libtorrent
-    /// `dht_tracker::get_item(sha1_hash)`).
-    pub fn get_immutable_item(&mut self, target: NodeId, now: Time) {
-        let active = self.nodes.len();
-        self.agg.immutable_gets.insert(
-            target,
-            ImmutableGet {
-                active,
-                posted: false,
-            },
-        );
-        for idx in 0..active {
-            self.with_node(idx, now, |node, env| node.get_immutable(env, target));
+    /// Looks an immutable item up on every node. One
+    /// [`Event::Operation`] wrapping an [`Event::GetItemDone`] arrives for
+    /// the returned operation, when an item is found or, empty, when every
+    /// node came back empty-handed (libtorrent
+    /// `dht_tracker::get_item(sha1_hash)`). A second get of a target
+    /// already being fetched joins the first.
+    pub fn get_immutable_item(&mut self, target: NodeId, now: Time) -> OpId {
+        let op = self.agg.new_op();
+        if self.agg.start_immutable_get(op, target, &mut self.events) {
+            for idx in 0..self.nodes.len() {
+                self.with_node(idx, now, |node, env| node.get_immutable(env, target));
+            }
         }
+        op
     }
 
     /// Looks a mutable item up on every node: better versions arrive as
-    /// non-authoritative [`Event::GetItemDone`]s, then one authoritative
-    /// event carries the best version found (libtorrent
-    /// `dht_tracker::get_item(public_key, ..)`).
-    pub fn get_mutable_item(&mut self, pk: PublicKey, salt: &[u8], now: Time) {
+    /// non-authoritative, then one authoritative [`Event::GetItemDone`]
+    /// carries the best version found, each wrapped in an
+    /// [`Event::Operation`] for the returned operation (libtorrent
+    /// `dht_tracker::get_item(public_key, ..)`). Concurrent gets of one key
+    /// and salt share one lookup.
+    pub fn get_mutable_item(&mut self, pk: PublicKey, salt: &[u8], now: Time) -> OpId {
         let target = crate::item::item_target_id(salt, &pk);
-        let active = self.nodes.len();
-        self.agg.mutable_gets.insert(
-            target,
-            MutableGet {
-                active,
-                best: Item::new(),
-            },
-        );
-        for idx in 0..active {
-            self.with_node(idx, now, |node, env| node.get_mutable(env, pk, salt));
+        let op = self.agg.new_op();
+        if self.agg.start_mutable_get(op, target, &mut self.events) {
+            for idx in 0..self.nodes.len() {
+                self.with_node(idx, now, |node, env| node.get_mutable(env, pk, salt));
+            }
         }
+        op
     }
 
-    /// Stores an immutable item on the network and returns its target;
-    /// one [`Event::PutDone`] with the total number of acknowledging nodes
-    /// follows (libtorrent `dht_tracker::put_item(entry, ..)`).
-    pub fn put_immutable_item(&mut self, data: Entry, now: Time) -> NodeId {
+    /// Stores an immutable item on the network. One [`Event::Operation`]
+    /// wrapping an [`Event::PutDone`] (with the total number of
+    /// acknowledging nodes and the target in it) follows for the returned
+    /// operation (libtorrent `dht_tracker::put_item(entry, ..)`). Puts of
+    /// the same target run one at a time in the order started.
+    pub fn put_immutable_item(&mut self, data: Entry, now: Time) -> OpId {
+        let op = self.agg.new_op();
         let target = immutable_item_target_id(&data.encode());
-        let active = self.nodes.len();
-        self.agg.puts.insert(
+        let job = PutJob {
+            op,
             target,
-            PendingPut {
-                active,
-                responses: 0,
-            },
-        );
-        for idx in 0..active {
-            let d = data.clone();
-            self.with_node(idx, now, |node, env| node.put_immutable(env, target, d));
-        }
-        target
+            kind: PutKind::Immutable(data),
+        };
+        self.agg.enqueue_put(job, &mut self.events);
+        self.start_queued_puts(now);
+        op
     }
 
     /// Stores a mutable item. On every node `data_cb` is called once with
     /// the authoritative item found (empty if none) and must leave the
     /// item to store in it, signed for its key and salt; incrementing the
     /// sequence number makes this a compare-and-swap. One
-    /// [`Event::PutDone`] with the total acknowledgements follows
-    /// (libtorrent `dht_tracker::put_item(public_key, ..)`).
+    /// [`Event::Operation`] wrapping an [`Event::PutDone`] follows for the
+    /// returned operation (libtorrent `dht_tracker::put_item(public_key,
+    /// ..)`). Puts of the same target run one at a time in the order
+    /// started, so a second put's callback sees the first one's item.
     pub fn put_mutable_item(
         &mut self,
         pk: PublicKey,
         salt: &[u8],
         data_cb: Arc<dyn Fn(&mut Item) + Send + Sync>,
         now: Time,
-    ) {
-        let target = crate::item::item_target_id(salt, &pk);
-        let active = self.nodes.len();
-        self.agg.puts.insert(
-            target,
-            PendingPut {
-                active,
-                responses: 0,
+    ) -> OpId {
+        let op = self.agg.new_op();
+        let job = PutJob {
+            op,
+            target: crate::item::item_target_id(salt, &pk),
+            kind: PutKind::Mutable {
+                pk,
+                salt: salt.to_vec(),
+                cb: data_cb,
             },
-        );
-        for idx in 0..active {
-            let cb = Arc::clone(&data_cb);
-            self.with_node(idx, now, |node, env| {
-                node.put_mutable(env, pk, salt, Box::new(move |i| cb(i)));
-            });
-        }
+        };
+        self.agg.enqueue_put(job, &mut self.events);
+        self.start_queued_puts(now);
+        op
+    }
+
+    /// Number of BEP 44 operations still waiting for a result.
+    #[must_use]
+    pub fn operations_in_flight(&self) -> usize {
+        self.agg.in_flight()
     }
 
     /// Sends a BEP 51 `sample_infohashes` from the first node of `ep`'s

@@ -98,3 +98,54 @@ async fn test_driver_state_and_direct_request() {
         .expect("answered");
     assert_eq!(r.get("y"), Some(&Entry::from("r")));
 }
+
+/// Two concurrent gets of one immutable target, and two concurrent puts of
+/// one mutable slot, each get their own answer through the handle.
+#[tokio::test]
+async fn test_driver_concurrent_same_target_operations() {
+    let nodes = swarm().await;
+    let v = Entry::from("concurrent value");
+    let (target, _) = nodes[1].put_immutable(v.clone()).await.expect("put");
+    let (a, b) = tokio::join!(
+        nodes[2].get_immutable(target),
+        nodes[2].get_immutable(target)
+    );
+    assert_eq!(a, Some(v.clone()));
+    assert_eq!(b, Some(v));
+
+    let (pk, sk) = create_keypair(&[9u8; 32]);
+    let cb = |text: &'static str| {
+        Arc::new(move |i: &mut Item| {
+            let seq = SequenceNumber(i.seq().0.max(0) + 1);
+            *i = Item::signed(Entry::from(text), b"c", seq, &pk, &sk).expect("small item");
+        })
+    };
+    let (p1, p2) = tokio::join!(
+        nodes[1].put_mutable(pk, b"c", cb("first")),
+        nodes[1].put_mutable(pk, b"c", cb("second"))
+    );
+    assert!(p1.is_some_and(|n| n >= 1) && p2.is_some_and(|n| n >= 1));
+    let (m1, m2) = tokio::join!(
+        nodes[2].get_mutable(pk, b"c"),
+        nodes[2].get_mutable(pk, b"c")
+    );
+    let (m1, m2) = (m1.expect("found"), m2.expect("found"));
+    assert_eq!(m1.seq(), SequenceNumber(2));
+    assert_eq!(m2.value(), &Entry::from("second"));
+}
+
+/// Shutting the handle down resolves requests that cannot complete to
+/// `None` instead of hanging.
+#[tokio::test]
+async fn test_driver_shutdown_resolves_pending_requests() {
+    let nodes = swarm().await;
+    let h = nodes[1].clone();
+    let pending = tokio::spawn(async move { h.get_immutable(Sha1Hash([4; 20])).await });
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    nodes[1].shutdown();
+    let r = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("resolved after shutdown")
+        .expect("task ok");
+    assert_eq!(r, None);
+}

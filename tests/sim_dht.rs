@@ -11,7 +11,7 @@ use std::time::Duration;
 use cloudllm_dht::announce_flags::AnnounceFlags;
 use cloudllm_dht::bencode::{decode, Entry};
 use cloudllm_dht::dht_state::DhtState;
-use cloudllm_dht::events::Event;
+use cloudllm_dht::events::{Event, OpId};
 use cloudllm_dht::rng::{Rng, TestRng};
 use cloudllm_dht::testing::{ep, rand_v4, rand_v6};
 use cloudllm_dht::time::Time;
@@ -219,9 +219,20 @@ fn test_sim_dht_bootstrap_first_packet_has_bs() {
     );
 }
 
+/// The result events tagged with `op`, in order.
+fn results_of(events: &[Event], op: OpId) -> Vec<&Event> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Operation { op: o, result } if *o == op => Some(&**result),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Ports `TEST_CASE(dht_dual_stack_immutable_item)`: put an immutable item
-/// through the dual-stack session and get it back; exactly one `GetItemDone`
-/// arrives for the request.
+/// through the dual-stack session and get it back; exactly one result
+/// arrives for the get operation.
 #[test]
 fn test_sim_dht_dual_stack_immutable_item() {
     let mut sim = SimNet::new(3);
@@ -231,33 +242,27 @@ fn test_sim_dht_dual_stack_immutable_item() {
     sim.run_for(Duration::from_secs(2));
     let now = sim.now();
     let value = Entry::from("immutable item");
-    let target = sim.peers[me].dht.put_immutable_item(value.clone(), now);
+    let target = cloudllm_dht::item::immutable_item_target_id(&value.encode());
+    let put = sim.peers[me].dht.put_immutable_item(value.clone(), now);
     sim.poke(me);
     sim.run_for(Duration::from_secs(2));
-    let puts: Vec<_> = sim.peers[me].dht.drain_events();
-    let acks = puts.iter().find_map(|e| match e {
-        Event::PutDone { responses, .. } => Some(*responses),
-        _ => None,
-    });
-    assert!(acks.is_some_and(|n| n > 0), "put acknowledged: {acks:?}");
+    let events = sim.peers[me].dht.drain_events();
+    let puts = results_of(&events, put);
+    assert_eq!(puts.len(), 1);
+    assert!(
+        matches!(puts[0], Event::PutDone { responses, target: t, .. } if *responses > 0 && *t == target),
+        "put acknowledged: {puts:?}"
+    );
 
     let now = sim.now();
-    sim.peers[me].dht.get_immutable_item(target, now);
+    let get = sim.peers[me].dht.get_immutable_item(target, now);
     sim.poke(me);
     sim.run_for(Duration::from_secs(2));
-    let found: Vec<_> = sim.peers[me]
-        .dht
-        .drain_events()
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::GetItemDone {
-                target: t, item, ..
-            } if t == target => Some(item),
-            _ => None,
-        })
-        .collect();
+    let events = sim.peers[me].dht.drain_events();
+    let found = results_of(&events, get);
     assert_eq!(found.len(), 1, "one answer per request");
-    assert_eq!(found[0].value(), &value);
+    assert!(matches!(found[0], Event::GetItemDone { item, .. } if item.value() == &value));
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
 }
 
 /// Ports `TEST_CASE(dht_dual_stack_mutable_item)`: the data callback runs
@@ -306,12 +311,12 @@ fn test_sim_dht_dual_stack_mutable_item() {
     sim.peers[me].dht.drain_events();
 
     let now = sim.now();
-    sim.peers[me].dht.get_mutable_item(pk, b"", now);
+    let get = sim.peers[me].dht.get_mutable_item(pk, b"", now);
     sim.poke(me);
     sim.run_for(Duration::from_secs(2));
     let events = sim.peers[me].dht.drain_events();
-    let authoritative: Vec<_> = events
-        .iter()
+    let authoritative: Vec<_> = results_of(&events, get)
+        .into_iter()
         .filter_map(|e| match e {
             Event::GetItemDone {
                 item,
@@ -324,6 +329,84 @@ fn test_sim_dht_dual_stack_mutable_item() {
     assert_eq!(authoritative.len(), 1);
     assert_eq!(authoritative[0].pk(), &pk);
     assert_eq!(authoritative[0].value(), &Entry::from("mutable item"));
+}
+
+/// Two concurrent gets of the same immutable target each get their own
+/// tagged result; two concurrent gets of the same mutable key likewise, and
+/// a put of that key running meanwhile steals neither.
+#[test]
+fn test_sim_dht_concurrent_same_target_operations() {
+    use cloudllm_dht::ed25519::create_keypair;
+    use cloudllm_dht::item::Item;
+    use cloudllm_dht::types::SequenceNumber;
+    use std::sync::Arc;
+
+    let mut sim = SimNet::new(6);
+    let (_, routers4) = build_network(&mut sim, 60, false, 61);
+    let (me, _) = session(&mut sim, &routers4, &[], 600);
+    sim.run_for(Duration::from_secs(2));
+    let value = Entry::from("shared value");
+    let target = cloudllm_dht::item::immutable_item_target_id(&value.encode());
+    let now = sim.now();
+    sim.peers[me].dht.put_immutable_item(value.clone(), now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(3));
+    sim.peers[me].dht.drain_events();
+
+    let now = sim.now();
+    let g1 = sim.peers[me].dht.get_immutable_item(target, now);
+    let g2 = sim.peers[me].dht.get_immutable_item(target, now);
+    assert_ne!(g1, g2);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(3));
+    let events = sim.peers[me].dht.drain_events();
+    for g in [g1, g2] {
+        let r = results_of(&events, g);
+        assert_eq!(r.len(), 1, "operation {g:?} got exactly one result");
+        assert!(matches!(r[0], Event::GetItemDone { item, .. } if item.value() == &value));
+    }
+
+    // mutable: two puts of one slot in a row (the second sees the first),
+    // with two gets running at the same time
+    let (pk, sk) = create_keypair(&[3u8; 32]);
+    let cb = |seq_text: (i64, &'static str)| {
+        Arc::new(move |i: &mut Item| {
+            let next = SequenceNumber(i.seq().0.max(0) + 1);
+            assert_eq!(next.0, seq_text.0, "the callback sees the previous put");
+            *i = Item::signed(Entry::from(seq_text.1), b"", next, &pk, &sk).unwrap();
+        })
+    };
+    let now = sim.now();
+    let p1 = sim.peers[me]
+        .dht
+        .put_mutable_item(pk, b"", cb((1, "one")), now);
+    let p2 = sim.peers[me]
+        .dht
+        .put_mutable_item(pk, b"", cb((2, "two")), now);
+    let m1 = sim.peers[me].dht.get_mutable_item(pk, b"", now);
+    let m2 = sim.peers[me].dht.get_mutable_item(pk, b"", now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(10));
+    let events = sim.peers[me].dht.drain_events();
+    for p in [p1, p2] {
+        let r = results_of(&events, p);
+        assert_eq!(r.len(), 1, "put {p:?}");
+        assert!(matches!(r[0], Event::PutDone { responses, .. } if *responses > 0));
+    }
+    for m in [m1, m2] {
+        let r = results_of(&events, m);
+        assert!(
+            matches!(
+                r.last(),
+                Some(Event::GetItemDone {
+                    authoritative: true,
+                    ..
+                })
+            ),
+            "get {m:?} finished: {r:?}"
+        );
+    }
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
 }
 
 /// `direct_request` and `sample_infohashes` through the tracker: the answers
@@ -383,4 +466,29 @@ fn test_sim_dht_shutdown_aborts_requests() {
     assert_eq!(node.rpc().num_transactions(), 0);
     assert_eq!(node.rpc().num_allocated_observers(), 0);
     assert_eq!(node.num_lookups(), 0);
+}
+
+/// Operations still running at shutdown are cancelled, not left dangling.
+#[test]
+fn test_sim_dht_shutdown_cancels_operations() {
+    let now = Time::ZERO + Duration::from_secs(1000);
+    let mut dht = Dht::builder(net_settings())
+        .rng(Box::new(TestRng::new(1)))
+        .build();
+    dht.add_socket(ep("10.0.0.1", 6881), None, now);
+    // a silent router keeps every lookup waiting for an answer
+    dht.add_router_node(ep("40.1.1.1", 1));
+    let g = dht.get_immutable_item(Sha1Hash([5; 20]), now);
+    let p = dht.put_immutable_item(Entry::from("x"), now);
+    let p2 = dht.put_immutable_item(Entry::from("x"), now);
+    assert_eq!(dht.operations_in_flight(), 3);
+    dht.shutdown(now);
+    // every operation ends exactly once: an aborted lookup reports what it
+    // has (nothing), anything that cannot be finished is cancelled
+    let events = dht.drain_events();
+    for op in [g, p, p2] {
+        let ends = events.iter().filter(|e| e.op() == Some(op)).count();
+        assert_eq!(ends, 1, "operation {op:?}: {events:?}");
+    }
+    assert_eq!(dht.operations_in_flight(), 0);
 }

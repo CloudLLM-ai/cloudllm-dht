@@ -48,6 +48,24 @@ pub enum Event {
     /// A bootstrap traversal finished (the `done_callback` passed to
     /// `node::bootstrap`).
     BootstrapDone,
+    /// A result of a tracker-level operation, tagged with the operation it
+    /// answers. `result` is the aggregated [`Event::GetItemDone`] (a mutable
+    /// get may produce several, the last one authoritative) or
+    /// [`Event::PutDone`] across all of the tracker's nodes. Unlike the
+    /// per-node events inside the traversals this is what a `Dht` owner
+    /// sees, so two concurrent operations on the same target never mix.
+    Operation {
+        /// The operation.
+        op: OpId,
+        /// Its result.
+        result: Box<Event>,
+    },
+    /// The operation will produce no result because the tracker shut down
+    /// or a socket was removed while it was running.
+    OperationCancelled {
+        /// The operation.
+        op: OpId,
+    },
     /// A remote node asked us for peers (libtorrent
     /// `dht_observer::get_peers`).
     IncomingGetPeers {
@@ -141,4 +159,21 @@ pub enum Event {
         /// The response dictionary as received, or `None` on timeout.
         reply: Option<Entry>,
     },
+}
+
+/// Identifies one operation started on a `Dht` (a BEP 44 get or put). Ids
+/// are unique within a tracker and never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpId(pub u64);
+
+impl Event {
+    /// The operation this event belongs to, if the tracker tagged it
+    /// ([`Event::Operation`] or [`Event::OperationCancelled`]).
+    #[must_use]
+    pub fn op(&self) -> Option<OpId> {
+        match self {
+            Self::Operation { op, .. } | Self::OperationCancelled { op } => Some(*op),
+            _ => None,
+        }
+    }
 }
