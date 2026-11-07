@@ -65,3 +65,10 @@ path = "fuzz_targets/traversal_replies.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "node_incoming"
+path = "fuzz_targets/node_incoming.rs"
+test = false
+doc = false
+bench = false
