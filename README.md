@@ -74,12 +74,26 @@ libtorrent source file and test case to its Rust module and says what is done.
 
 ## Engineering
 
+[![ci](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/ci.yml)
+[![audit](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/audit.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/audit.yml)
+[![fuzz](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/fuzz.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/fuzz.yml)
+[![bench](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/bench.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/bench.yml)
+[![soak](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/soak.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/soak.yml)
+[![security](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/security.yml/badge.svg?branch=master)](https://github.com/CloudLLM-ai/cloudllm-dht/actions/workflows/security.yml)
+[![coverage gate](https://img.shields.io/badge/coverage%20gate-%E2%89%A590%25-brightgreen)](docs/ENGINEERING.md#coverage)
+
 The crate follows the house standards in [skills/](skills/): `make ci`
 (fmt, check, clippy `-D warnings`, tests, rustdoc `-D warnings`),
 `make msrv` (Rust 1.88), `make fuzz-build` / `make fuzz-replay` / `make fuzz
 TARGET=...` (nightly, cargo-fuzz). No `unsafe`. Every public item is
 documented; tests live in `tests/` and port libtorrent's test cases under
 snake_case names with a comment naming the original `TEST_CASE`.
+
+CI also gates coverage (regions, functions and lines at 90%), checks the
+dependencies daily against a policy, fuzzes every target weekly, runs the
+benchmarks and a long in-memory churn simulation weekly, and does a weekly
+security review. [docs/ENGINEERING.md](docs/ENGINEERING.md) explains each job,
+its threshold and the `make` target that reproduces it.
 
 ## License and attribution
 
