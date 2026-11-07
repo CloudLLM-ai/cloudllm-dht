@@ -8,6 +8,18 @@
 //! Norberg and contributors), extended so that every operation has its own
 //! [`OpId`].
 //!
+//! # Operations without a libtorrent counterpart
+//!
+//! Peer lookups, announces, bootstraps, samples and direct requests are
+//! *tasks*: they run on some or all nodes, and the tracker tells the owner
+//! when the last of those node-level lookups has ended
+//! ([`Event::OperationDone`]). Their results are tagged too; since the nodes
+//! report peers by info-hash and samples by endpoint, results are routed by
+//! those keys to the operations waiting for them (a peer is delivered once
+//! per operation). Direct requests carry the operation id as their token.
+//! Samples of one endpoint run one at a time, because replies can arrive in
+//! any order and a reply names no request.
+//!
 //! # Why this is not a straight port
 //!
 //! libtorrent hands each operation its own `std::function`, so two
@@ -26,7 +38,8 @@
 //! * A get and a put of the same target never interfere: a put's inner
 //!   lookup reports nothing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::bencode::Entry;
@@ -64,6 +77,12 @@ struct Lane {
     waiting: VecDeque<PutJob>,
 }
 
+#[derive(Default)]
+struct SampleLane {
+    current: Option<OpId>,
+    waiting: VecDeque<(OpId, NodeId)>,
+}
+
 struct ImmutableGet {
     ops: Vec<OpId>,
     active: usize,
@@ -76,6 +95,16 @@ struct MutableGet {
     best: Item,
 }
 
+/// What a task's results are routed by.
+pub(crate) enum TaskKind {
+    /// A `get_peers` or `announce` of this info-hash.
+    Peers(NodeId),
+    /// A `sample_infohashes` to this endpoint.
+    Sample(SocketAddr, NodeId),
+    /// Bootstrap and direct requests: nothing to route.
+    Plain,
+}
+
 /// Per-tracker operation state.
 #[derive(Default)]
 pub(crate) struct Aggregator {
@@ -83,6 +112,15 @@ pub(crate) struct Aggregator {
     /// tracker).
     pub nodes: usize,
     next_op: u64,
+    /// Running tasks and how many node-level lookups of each are left.
+    tasks: HashMap<OpId, usize>,
+    /// Peer-lookup operations by info-hash, with the peers already
+    /// delivered to each.
+    peer_ops: HashMap<NodeId, Vec<(OpId, HashSet<SocketAddr>)>>,
+    /// Sample operations by endpoint: the running one and those waiting.
+    sample_lanes: HashMap<SocketAddr, SampleLane>,
+    /// Samples whose turn has come: (operation, endpoint, target).
+    pub samples_to_start: Vec<(OpId, SocketAddr, NodeId)>,
     immutable_gets: HashMap<NodeId, ImmutableGet>,
     mutable_gets: HashMap<NodeId, MutableGet>,
     lanes: HashMap<NodeId, Lane>,
@@ -106,10 +144,12 @@ impl Aggregator {
 
     /// Number of operations still waiting for a result.
     pub fn in_flight(&self) -> usize {
-        self.immutable_gets
-            .values()
-            .map(|g| g.ops.len())
-            .sum::<usize>()
+        self.tasks.len()
+            + self
+                .immutable_gets
+                .values()
+                .map(|g| g.ops.len())
+                .sum::<usize>()
             + self
                 .mutable_gets
                 .values()
@@ -132,11 +172,15 @@ impl Aggregator {
     ) -> bool {
         if self.nodes == 0 {
             out.push_back(tagged(op, empty_get(target)));
+            out.push_back(Event::OperationDone { op });
             return false;
         }
         if let Some(g) = self.immutable_gets.get_mut(&target) {
             match &g.posted {
-                Some(item) => out.push_back(tagged(op, found(target, item.clone()))),
+                Some(item) => {
+                    out.push_back(tagged(op, found(target, item.clone())));
+                    out.push_back(Event::OperationDone { op });
+                }
                 None => g.ops.push(op),
             }
             return false;
@@ -161,6 +205,7 @@ impl Aggregator {
     ) -> bool {
         if self.nodes == 0 {
             out.push_back(tagged(op, empty_get(target)));
+            out.push_back(Event::OperationDone { op });
             return false;
         }
         if let Some(g) = self.mutable_gets.get_mut(&target) {
@@ -190,6 +235,7 @@ impl Aggregator {
                     responses: 0,
                 },
             ));
+            out.push_back(Event::OperationDone { op: job.op });
             return;
         }
         let lane = self.lanes.entry(job.target).or_default();
@@ -221,9 +267,121 @@ impl Aggregator {
                     item,
                     responses,
                 } => self.put_done(target, item, responses, out),
+                Event::GetPeersReply { target, peers } => self.peers_reply(target, peers, out),
+                Event::SampleInfohashes {
+                    from,
+                    nid,
+                    interval,
+                    num,
+                    samples,
+                    nodes,
+                } => {
+                    let ev = Event::SampleInfohashes {
+                        from,
+                        nid,
+                        interval,
+                        num,
+                        samples,
+                        nodes,
+                    };
+                    match self.sample_lanes.get(&from).and_then(|l| l.current) {
+                        Some(op) => out.push_back(tagged(op, ev)),
+                        None => out.push_back(ev),
+                    }
+                }
+                Event::DirectResponse { token, from, reply } => {
+                    let ev = Event::DirectResponse { token, from, reply };
+                    if self.tasks.contains_key(&OpId(token)) {
+                        out.push_back(tagged(OpId(token), ev));
+                    } else {
+                        out.push_back(ev);
+                    }
+                }
+                Event::LookupFinished { tag } => self.lookup_finished(OpId(tag), out),
                 other => out.push_back(other),
             }
         }
+    }
+
+    /// Registers a task running on `running` nodes. With none it is done at
+    /// once.
+    pub fn start_task(
+        &mut self,
+        op: OpId,
+        running: usize,
+        kind: TaskKind,
+        out: &mut VecDeque<Event>,
+    ) {
+        if running == 0 {
+            out.push_back(Event::OperationDone { op });
+            return;
+        }
+        self.tasks.insert(op, running);
+        match kind {
+            TaskKind::Peers(target) => self
+                .peer_ops
+                .entry(target)
+                .or_default()
+                .push((op, HashSet::new())),
+            TaskKind::Sample(ep, target) => {
+                let lane = self.sample_lanes.entry(ep).or_default();
+                if lane.current.is_none() {
+                    lane.current = Some(op);
+                    self.samples_to_start.push((op, ep, target));
+                } else {
+                    lane.waiting.push_back((op, target));
+                }
+            }
+            TaskKind::Plain => {}
+        }
+    }
+
+    fn peers_reply(&mut self, target: NodeId, peers: Vec<SocketAddr>, out: &mut VecDeque<Event>) {
+        let Some(ops) = self.peer_ops.get_mut(&target) else {
+            out.push_back(Event::GetPeersReply { target, peers });
+            return;
+        };
+        for (op, seen) in ops.iter_mut() {
+            let fresh: Vec<SocketAddr> =
+                peers.iter().copied().filter(|p| seen.insert(*p)).collect();
+            if !fresh.is_empty() {
+                out.push_back(tagged(
+                    *op,
+                    Event::GetPeersReply {
+                        target,
+                        peers: fresh,
+                    },
+                ));
+            }
+        }
+    }
+
+    fn lookup_finished(&mut self, op: OpId, out: &mut VecDeque<Event>) {
+        let Some(left) = self.tasks.get_mut(&op) else {
+            return;
+        };
+        *left = left.saturating_sub(1);
+        if *left > 0 {
+            return;
+        }
+        self.tasks.remove(&op);
+        self.peer_ops.retain(|_, v| {
+            v.retain(|(o, _)| *o != op);
+            !v.is_empty()
+        });
+        let mut next = Vec::new();
+        self.sample_lanes.retain(|ep, lane| {
+            lane.waiting.retain(|(o, _)| *o != op);
+            if lane.current == Some(op) {
+                lane.current = lane.waiting.pop_front().map(|(o, t)| {
+                    next.push((o, *ep, t));
+                    o
+                });
+            }
+            lane.current.is_some()
+        });
+        self.samples_to_start.extend(next);
+        out.push_back(Event::OperationDone { op });
     }
 
     fn get_done(
@@ -238,6 +396,7 @@ impl Aggregator {
             if g.posted.is_none() && (!item.is_empty() || g.active == 0) {
                 for op in g.ops.drain(..) {
                     out.push_back(tagged(op, found(target, item.clone())));
+                    out.push_back(Event::OperationDone { op });
                 }
                 g.posted = Some(item);
             }
@@ -265,6 +424,9 @@ impl Aggregator {
                             authoritative: last,
                         },
                     ));
+                    if last {
+                        out.push_back(Event::OperationDone { op: *op });
+                    }
                 }
             }
             if last {
@@ -301,6 +463,7 @@ impl Aggregator {
                 responses: done.responses,
             },
         ));
+        out.push_back(Event::OperationDone { op: done.op });
         if let Some(next) = lane.waiting.pop_front() {
             lane.current = Some(Running {
                 op: next.op,
@@ -315,7 +478,10 @@ impl Aggregator {
 
     /// Cancels every operation in flight (shutdown, socket removed).
     pub fn cancel_all(&mut self, out: &mut VecDeque<Event>) {
-        let mut ops: Vec<OpId> = Vec::new();
+        let mut ops: Vec<OpId> = self.tasks.drain().map(|(op, _)| op).collect();
+        self.peer_ops.clear();
+        self.sample_lanes.clear();
+        self.samples_to_start.clear();
         ops.extend(self.immutable_gets.drain().flat_map(|(_, g)| g.ops));
         ops.extend(self.mutable_gets.drain().flat_map(|(_, g)| g.ops));
         for (_, lane) in self.lanes.drain() {

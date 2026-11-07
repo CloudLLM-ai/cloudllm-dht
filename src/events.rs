@@ -48,6 +48,23 @@ pub enum Event {
     /// A bootstrap traversal finished (the `done_callback` passed to
     /// `node::bootstrap`).
     BootstrapDone,
+    /// A lookup the owner asked a node to track has finished and left the
+    /// node's arena (no request of it is in flight any more). `tag` is the
+    /// value passed when it was started. Node-level plumbing: a `Dht` turns
+    /// it into [`Event::OperationDone`].
+    LookupFinished {
+        /// The caller's tag.
+        tag: u64,
+    },
+    /// The operation is complete: its results have all been delivered as
+    /// [`Event::Operation`]s. Every operation started on a `Dht` ends
+    /// exactly once, with this event or with
+    /// [`Event::OperationCancelled`]; nothing is tagged with its id
+    /// afterwards.
+    OperationDone {
+        /// The operation.
+        op: OpId,
+    },
     /// A result of a tracker-level operation, tagged with the operation it
     /// answers. `result` is the aggregated [`Event::GetItemDone`] (a mutable
     /// get may produce several, the last one authoritative) or
@@ -167,12 +184,23 @@ pub enum Event {
 pub struct OpId(pub u64);
 
 impl Event {
+    /// `true` for the two events that end an operation.
+    #[must_use]
+    pub fn ends_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::OperationDone { .. } | Self::OperationCancelled { .. }
+        )
+    }
+
     /// The operation this event belongs to, if the tracker tagged it
-    /// ([`Event::Operation`] or [`Event::OperationCancelled`]).
+    /// ([`Event::Operation`], [`Event::OperationDone`] or [`Event::OperationCancelled`]).
     #[must_use]
     pub fn op(&self) -> Option<OpId> {
         match self {
-            Self::Operation { op, .. } | Self::OperationCancelled { op } => Some(*op),
+            Self::Operation { op, .. }
+            | Self::OperationDone { op }
+            | Self::OperationCancelled { op } => Some(*op),
             _ => None,
         }
     }

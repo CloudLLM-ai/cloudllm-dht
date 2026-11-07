@@ -66,7 +66,7 @@ mod ops;
 pub mod prefilter;
 pub mod quota;
 
-use ops::{Aggregator, PutJob, PutKind};
+use ops::{Aggregator, PutJob, PutKind, TaskKind};
 use prefilter::{is_dark_internet, plausible_dht_datagram};
 use quota::SendQuota;
 
@@ -526,7 +526,7 @@ impl Dht {
         if self.running {
             let idx = self.nodes.len() - 1;
             self.nodes[idx].next_timeout = Some(now + FIRST_CONNECTION_TIMEOUT);
-            self.with_node(idx, now, |node, env| node.bootstrap(env, &[], true));
+            self.with_node(idx, now, |node, env| node.bootstrap(env, &[], true, None));
         }
         id
     }
@@ -617,7 +617,7 @@ impl Dht {
         };
         nodes[idx].node = Some(node);
         agg.absorb(scratch, events);
-        if !self.agg.to_start.is_empty() {
+        if !self.agg.to_start.is_empty() || !self.agg.samples_to_start.is_empty() {
             self.start_queued_puts(now);
         }
         Some(result)
@@ -625,6 +625,13 @@ impl Dht {
 
     /// Starts the puts whose turn has come on every node.
     fn start_queued_puts(&mut self, now: Time) {
+        for (op, ep, target) in std::mem::take(&mut self.agg.samples_to_start) {
+            if let Some(idx) = self.node_index_for(ep) {
+                self.with_node(idx, now, |node, env| {
+                    node.sample_infohashes(env, ep, target, Some(op.0));
+                });
+            }
+        }
         let jobs = std::mem::take(&mut self.agg.to_start);
         for job in jobs {
             for idx in 0..self.nodes.len() {
@@ -665,7 +672,9 @@ impl Dht {
                 Some(Protocol::V6) => [state.nodes6.as_slice(), state.nodes.as_slice()].concat(),
                 _ => [state.nodes.as_slice(), state.nodes6.as_slice()].concat(),
             };
-            self.with_node(idx, now, |node, env| node.bootstrap(env, &seeds, true));
+            self.with_node(idx, now, |node, env| {
+                node.bootstrap(env, &seeds, true, None)
+            });
         }
     }
 
@@ -847,11 +856,20 @@ impl Dht {
 
     /// Starts a bootstrap on every node, seeded with `seeds` (libtorrent
     /// `node::bootstrap`, which `dht_tracker::start` runs from the saved
-    /// state). Each node's completion produces an [`Event::BootstrapDone`].
-    pub fn bootstrap(&mut self, seeds: &[SocketAddr], now: Time) {
-        for idx in 0..self.nodes.len() {
-            self.with_node(idx, now, |node, env| node.bootstrap(env, seeds, true));
+    /// state). Each node's completion produces an [`Event::BootstrapDone`];
+    /// the operation ends with [`Event::OperationDone`] once every node's
+    /// bootstrap lookup has finished.
+    pub fn bootstrap(&mut self, seeds: &[SocketAddr], now: Time) -> OpId {
+        let op = self.agg.new_op();
+        let n = self.nodes.len();
+        self.agg
+            .start_task(op, n, TaskKind::Plain, &mut self.events);
+        for idx in 0..n {
+            self.with_node(idx, now, |node, env| {
+                node.bootstrap(env, seeds, true, Some(op.0));
+            });
         }
+        op
     }
 
     /// Pings `ep` from every node of its family and adds it to the table if
@@ -862,37 +880,55 @@ impl Dht {
         }
     }
 
-    /// Starts a `get_peers` lookup on every node; peers arrive as
-    /// [`Event::GetPeersReply`] (libtorrent `dht_tracker::get_peers`).
-    pub fn get_peers(&mut self, info_hash: NodeId, now: Time) {
-        for idx in 0..self.nodes.len() {
+    /// Starts a `get_peers` lookup on every node (libtorrent
+    /// `dht_tracker::get_peers`). The peers found arrive as
+    /// [`Event::Operation`]s wrapping [`Event::GetPeersReply`], each peer
+    /// once per operation; the operation ends with [`Event::OperationDone`]
+    /// when every node's lookup has finished (and its last request has been
+    /// answered or timed out). Concurrent lookups of one info-hash each get
+    /// the peers any of them finds.
+    pub fn get_peers(&mut self, info_hash: NodeId, now: Time) -> OpId {
+        let op = self.agg.new_op();
+        let n = self.nodes.len();
+        self.agg
+            .start_task(op, n, TaskKind::Peers(info_hash), &mut self.events);
+        for idx in 0..n {
             self.with_node(idx, now, |node, env| {
-                node.get_peers(env, info_hash, AnnounceFlags::EMPTY);
+                node.get_peers(env, info_hash, AnnounceFlags::EMPTY, Some(op.0));
             });
         }
+        op
     }
 
     /// Looks `info_hash` up and announces `listen_port` to the closest
     /// nodes on every node (libtorrent `dht_tracker::announce`). A
     /// `listen_port` of 0 announces each socket's own port, which is what
-    /// libtorrent obtains from its observer.
+    /// libtorrent obtains from its observer. Peers found on the way and the
+    /// completion are reported as for [`Dht::get_peers`]; completion means
+    /// the lookups have finished and the `announce_peer` requests have been
+    /// sent.
     pub fn announce(
         &mut self,
         info_hash: NodeId,
         listen_port: u16,
         flags: AnnounceFlags,
         now: Time,
-    ) {
-        for idx in 0..self.nodes.len() {
+    ) -> OpId {
+        let op = self.agg.new_op();
+        let n = self.nodes.len();
+        self.agg
+            .start_task(op, n, TaskKind::Peers(info_hash), &mut self.events);
+        for idx in 0..n {
             let port = if listen_port == 0 {
                 self.nodes[idx].local.port()
             } else {
                 listen_port
             };
             self.with_node(idx, now, |node, env| {
-                node.announce(env, info_hash, port, flags)
+                node.announce(env, info_hash, port, flags, Some(op.0));
             });
         }
+        op
     }
 
     /// Looks an immutable item up on every node. One
@@ -983,26 +1019,50 @@ impl Dht {
     }
 
     /// Sends a BEP 51 `sample_infohashes` from the first node of `ep`'s
-    /// family; the answer is an [`Event::SampleInfohashes`] (libtorrent
-    /// `dht_tracker::sample_infohashes`).
-    pub fn sample_infohashes(&mut self, ep: SocketAddr, target: NodeId, now: Time) {
-        if let Some(idx) = self.node_index_for(ep) {
-            self.with_node(idx, now, |node, env| {
-                node.sample_infohashes(env, ep, target)
-            });
-        }
+    /// family (libtorrent `dht_tracker::sample_infohashes`). The answer is
+    /// an [`Event::Operation`] wrapping an [`Event::SampleInfohashes`]; the
+    /// operation ends with [`Event::OperationDone`] after the answer or the
+    /// timeout (then without a result). Samples of one endpoint run one at a
+    /// time, in the order started.
+    pub fn sample_infohashes(&mut self, ep: SocketAddr, target: NodeId, now: Time) -> OpId {
+        let op = self.agg.new_op();
+        let idx = self.node_index_for(ep);
+        self.agg.start_task(
+            op,
+            usize::from(idx.is_some()),
+            TaskKind::Sample(ep, target),
+            &mut self.events,
+        );
+        self.start_queued_puts(now);
+        op
     }
 
-    /// Sends an arbitrary request from the first node of `ep`'s family;
-    /// the reply (or `None` after a timeout) is an
-    /// [`Event::DirectResponse`] carrying `token` (libtorrent
-    /// `dht_tracker::direct_request`).
-    pub fn direct_request(&mut self, ep: SocketAddr, request: Entry, token: u64, now: Time) {
-        if let Some(idx) = self.node_index_for(ep) {
-            self.with_node(idx, now, |node, env| {
-                node.direct_request(env, ep, request, token);
+    /// Sends an arbitrary request from the first node of `ep`'s family. The
+    /// reply (or `None` after a timeout) is an [`Event::Operation`]
+    /// wrapping an [`Event::DirectResponse`] whose token is the operation's
+    /// id; [`Event::OperationDone`] follows (libtorrent
+    /// `dht_tracker::direct_request`). With no node of that family the
+    /// answer is `None` at once.
+    pub fn direct_request(&mut self, ep: SocketAddr, request: Entry, now: Time) -> OpId {
+        let op = self.agg.new_op();
+        let Some(idx) = self.node_index_for(ep) else {
+            self.events.push_back(Event::Operation {
+                op,
+                result: Box::new(Event::DirectResponse {
+                    token: op.0,
+                    from: ep,
+                    reply: None,
+                }),
             });
-        }
+            self.events.push_back(Event::OperationDone { op });
+            return op;
+        };
+        self.agg
+            .start_task(op, 1, TaskKind::Plain, &mut self.events);
+        self.with_node(idx, now, |node, env| {
+            node.direct_request(env, ep, request, op.0, Some(op.0));
+        });
+        op
     }
 
     fn node_index_for(&self, ep: SocketAddr) -> Option<usize> {

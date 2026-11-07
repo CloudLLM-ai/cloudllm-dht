@@ -67,6 +67,7 @@ enum Command {
         info_hash: NodeId,
         port: u16,
         flags: AnnounceFlags,
+        reply: Reply<Vec<SocketAddr>>,
     },
     GetImmutable {
         target: NodeId,
@@ -232,8 +233,9 @@ impl DhtHandle {
     }
 
     /// Starts a `get_peers` lookup and returns the stream of peers as nodes
-    /// answer. The stream ends when the receiver is dropped. See
-    /// [`DhtHandle::lookup_peers`] for the collect-for-a-while form.
+    /// answer (each peer once). The stream ends when the lookup has
+    /// finished, the DHT shut down, or the receiver is dropped. See
+    /// [`DhtHandle::lookup_peers`] for the collecting form.
     #[must_use]
     pub fn get_peers(&self, info_hash: NodeId) -> mpsc::UnboundedReceiver<Vec<SocketAddr>> {
         let (sink, rx) = mpsc::unbounded_channel();
@@ -241,8 +243,8 @@ impl DhtHandle {
         rx
     }
 
-    /// Runs a `get_peers` lookup and collects the distinct peers it finds
-    /// within `wait`.
+    /// Runs a `get_peers` lookup and collects the distinct peers it finds,
+    /// until the lookup finishes or `wait` has passed, whichever is first.
     pub async fn lookup_peers(&self, info_hash: NodeId, wait: Duration) -> Vec<SocketAddr> {
         let mut rx = self.get_peers(info_hash);
         let mut peers: Vec<SocketAddr> = Vec::new();
@@ -258,13 +260,22 @@ impl DhtHandle {
     }
 
     /// Looks `info_hash` up and announces `port` (0 means each socket's own
-    /// port) to the closest nodes. Fire and forget, as in libtorrent.
-    pub fn announce(&self, info_hash: NodeId, port: u16, flags: AnnounceFlags) {
-        self.send(Command::Announce {
+    /// port) to the closest nodes. Completes when the lookup has finished
+    /// and the `announce_peer` requests are sent, returning the peers found
+    /// on the way; `None` if the DHT shut down first.
+    pub async fn announce(
+        &self,
+        info_hash: NodeId,
+        port: u16,
+        flags: AnnounceFlags,
+    ) -> Option<Vec<SocketAddr>> {
+        self.ask(|reply| Command::Announce {
             info_hash,
             port,
             flags,
-        });
+            reply,
+        })
+        .await
     }
 
     /// Fetches an immutable item (BEP 44). `None` if nobody has it.
@@ -340,13 +351,14 @@ impl DhtHandle {
 /// Requests waiting for an event, keyed by what identifies their answer.
 #[derive(Default)]
 struct Pending {
-    peers: HashMap<NodeId, Vec<mpsc::UnboundedSender<Vec<SocketAddr>>>>,
+    peers: HashMap<OpId, mpsc::UnboundedSender<Vec<SocketAddr>>>,
+    announces: HashMap<OpId, (Vec<SocketAddr>, Reply<Vec<SocketAddr>>)>,
+    samples: HashMap<OpId, (Option<SampleReply>, Reply<Option<SampleReply>>)>,
+    direct: HashMap<OpId, (Option<Entry>, Reply<Option<Entry>>)>,
     immutable: HashMap<OpId, Reply<Option<Entry>>>,
     mutable: HashMap<OpId, Reply<Option<Item>>>,
     puts: HashMap<OpId, PutWaiter>,
-    samples: HashMap<SocketAddr, Vec<Reply<Option<SampleReply>>>>,
-    direct: HashMap<u64, Reply<Option<Entry>>>,
-    bootstrap: Vec<(usize, Reply<()>)>,
+    bootstrap: HashMap<OpId, Reply<()>>,
 }
 
 enum PutWaiter {
@@ -369,6 +381,37 @@ impl Pending {
                     let _ = r.send((!item.is_empty()).then(|| item.clone()));
                 }
             }
+            Event::GetPeersReply { peers, .. } => {
+                if let Some(sink) = self.peers.get(&op) {
+                    let _ = sink.send(peers.clone());
+                }
+                if let Some((all, _)) = self.announces.get_mut(&op) {
+                    all.extend(peers.iter().copied());
+                }
+            }
+            Event::SampleInfohashes {
+                nid,
+                interval,
+                num,
+                samples,
+                nodes,
+                ..
+            } => {
+                if let Some((slot, _)) = self.samples.get_mut(&op) {
+                    *slot = Some(SampleReply {
+                        nid: *nid,
+                        interval: *interval,
+                        num: *num,
+                        samples: samples.clone(),
+                        nodes: nodes.clone(),
+                    });
+                }
+            }
+            Event::DirectResponse { reply, .. } => {
+                if let Some((slot, _)) = self.direct.get_mut(&op) {
+                    *slot = reply.clone();
+                }
+            }
             Event::PutDone {
                 target, responses, ..
             } => match self.puts.remove(&op) {
@@ -386,54 +429,44 @@ impl Pending {
 
     fn resolve(&mut self, ev: &Event) {
         match ev {
-            Event::GetPeersReply { target, peers } => {
-                if let Some(v) = self.peers.get_mut(target) {
-                    v.retain(|s| s.send(peers.clone()).is_ok());
-                }
-            }
             Event::Operation { op, result } => self.resolve_op(*op, result),
+            Event::OperationDone { op } => self.finish(*op),
             Event::OperationCancelled { op } => {
                 // dropping the senders makes the callers see `None`
                 self.immutable.remove(op);
                 self.mutable.remove(op);
                 self.puts.remove(op);
-            }
-            Event::SampleInfohashes {
-                from,
-                nid,
-                interval,
-                num,
-                samples,
-                nodes,
-            } => {
-                for r in self.samples.remove(from).into_iter().flatten() {
-                    let _ = r.send(Some(SampleReply {
-                        nid: *nid,
-                        interval: *interval,
-                        num: *num,
-                        samples: samples.clone(),
-                        nodes: nodes.clone(),
-                    }));
-                }
-            }
-            Event::DirectResponse { token, reply, .. } => {
-                if let Some(r) = self.direct.remove(token) {
-                    let _ = r.send(reply.clone());
-                }
-            }
-            Event::BootstrapDone => {
-                for (remaining, _) in &mut self.bootstrap {
-                    *remaining = remaining.saturating_sub(1);
-                }
-                let (done, waiting): (Vec<_>, Vec<_>) =
-                    self.bootstrap.drain(..).partition(|(n, _)| *n == 0);
-                self.bootstrap = waiting;
-                for (_, r) in done {
-                    let _ = r.send(());
-                }
+                self.peers.remove(op);
+                self.announces.remove(op);
+                self.samples.remove(op);
+                self.direct.remove(op);
+                self.bootstrap.remove(op);
             }
             _ => {}
         }
+    }
+
+    /// The operation is complete: answer what collects until the end.
+    fn finish(&mut self, op: OpId) {
+        // closing the sink ends the caller's stream
+        self.peers.remove(&op);
+        if let Some((peers, r)) = self.announces.remove(&op) {
+            let _ = r.send(peers);
+        }
+        if let Some((reply, r)) = self.samples.remove(&op) {
+            let _ = r.send(reply);
+        }
+        if let Some((reply, r)) = self.direct.remove(&op) {
+            let _ = r.send(reply);
+        }
+        if let Some(r) = self.bootstrap.remove(&op) {
+            let _ = r.send(());
+        }
+        // BEP 44 callers were answered by their result; one that was not
+        // (no result, which does not happen) sees `None`
+        self.immutable.remove(&op);
+        self.mutable.remove(&op);
+        self.puts.remove(&op);
     }
 }
 
@@ -523,7 +556,6 @@ async fn run(
         .map(|(id, s)| tokio::spawn(reader(*id, Arc::clone(s), in_tx.clone())))
         .collect();
     drop(in_tx);
-    let mut token = 0u64;
     flush(&mut dht, &sockets, &mut pending, &events, &clock).await;
     loop {
         let now = clock.now();
@@ -540,7 +572,7 @@ async fn run(
             }
             c = cmd.recv() => {
                 let Some(c) = c else { break };
-                if !handle(&mut dht, c, &mut pending, &mut token, clock.now()) {
+                if !handle(&mut dht, c, &mut pending, clock.now()) {
                     break;
                 }
             }
@@ -551,24 +583,28 @@ async fn run(
 }
 
 /// Executes one command; `false` means shut down.
-fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, token: &mut u64, now: Time) -> bool {
+fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, now: Time) -> bool {
     match c {
         Command::Bootstrap { routers, done } => {
             for r in &routers {
                 dht.add_router_node(*r);
             }
-            pending.bootstrap.push((dht.sockets().count(), done));
-            dht.bootstrap(&routers, now);
+            let op = dht.bootstrap(&routers, now);
+            pending.bootstrap.insert(op, done);
         }
         Command::GetPeers { info_hash, sink } => {
-            pending.peers.entry(info_hash).or_default().push(sink);
-            dht.get_peers(info_hash, now);
+            let op = dht.get_peers(info_hash, now);
+            pending.peers.insert(op, sink);
         }
         Command::Announce {
             info_hash,
             port,
             flags,
-        } => dht.announce(info_hash, port, flags, now),
+            reply,
+        } => {
+            let op = dht.announce(info_hash, port, flags, now);
+            pending.announces.insert(op, (Vec::new(), reply));
+        }
         Command::GetImmutable { target, reply } => {
             let op = dht.get_immutable_item(target, now);
             pending.immutable.insert(op, reply);
@@ -591,13 +627,12 @@ fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, token: &mut u64, now
             pending.puts.insert(op, PutWaiter::Mutable(reply));
         }
         Command::Sample { ep, target, reply } => {
-            pending.samples.entry(ep).or_default().push(reply);
-            dht.sample_infohashes(ep, target, now);
+            let op = dht.sample_infohashes(ep, target, now);
+            pending.samples.insert(op, (None, reply));
         }
         Command::Direct { ep, request, reply } => {
-            *token += 1;
-            pending.direct.insert(*token, reply);
-            dht.direct_request(ep, request, *token, now);
+            let op = dht.direct_request(ep, request, now);
+            pending.direct.insert(op, (None, reply));
         }
         Command::State(reply) => {
             let _ = reply.send(dht.state());

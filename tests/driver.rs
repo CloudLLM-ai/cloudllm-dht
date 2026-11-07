@@ -77,8 +77,8 @@ async fn test_driver_mutable_roundtrip() {
 async fn test_driver_announce_and_get_peers() {
     let nodes = swarm().await;
     let ih = Sha1Hash([9; 20]);
-    nodes[1].announce(ih, 4242, AnnounceFlags::EMPTY);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let found = nodes[1].announce(ih, 4242, AnnounceFlags::EMPTY).await;
+    assert!(found.is_some(), "the announce completed");
     let peers = nodes[2].lookup_peers(ih, Duration::from_secs(2)).await;
     assert!(peers.iter().any(|p| p.port() == 4242), "peers: {peers:?}");
 }
@@ -147,5 +147,47 @@ async fn test_driver_shutdown_resolves_pending_requests() {
         .await
         .expect("resolved after shutdown")
         .expect("task ok");
+    assert_eq!(r, None);
+}
+
+/// `lookup_peers` returns as soon as the lookup has finished, well before
+/// its timeout, and the peer stream ends by itself.
+#[tokio::test]
+async fn test_driver_lookup_completes_before_timeout() {
+    let nodes = swarm().await;
+    let ih = Sha1Hash([5; 20]);
+    let started = std::time::Instant::now();
+    let _ = nodes[2].lookup_peers(ih, Duration::from_secs(60)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
+    let mut stream = nodes[2].get_peers(ih);
+    let closed = tokio::time::timeout(Duration::from_secs(30), async {
+        while stream.recv().await.is_some() {}
+    })
+    .await;
+    assert!(closed.is_ok(), "the stream ended with the lookup");
+}
+
+/// Sampling and direct requests complete; a request to a silent endpoint
+/// resolves to `None`.
+#[tokio::test]
+async fn test_driver_sample_and_direct_complete() {
+    let nodes = swarm().await;
+    let s = nodes[1]
+        .sample_infohashes(nodes[0].local_addrs()[0], Sha1Hash([1; 20]))
+        .await;
+    assert!(s.is_some(), "a sample came back");
+    let mut ping = Entry::dict();
+    ping.set("q", "ping");
+    let silent: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let r = tokio::time::timeout(
+        Duration::from_secs(30),
+        nodes[1].direct_request(silent, ping),
+    )
+    .await
+    .expect("resolved");
     assert_eq!(r, None);
 }

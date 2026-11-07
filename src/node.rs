@@ -50,6 +50,7 @@ use crate::node_id::{
     NodeId,
 };
 use crate::observer::ObserverKind;
+use crate::observer::TraversalId;
 use crate::rng::Rng;
 use crate::routing_table::{BucketStatus, RoutingTable};
 use crate::settings::DhtSettings;
@@ -62,7 +63,7 @@ use crate::traversal::get_peers::{announce, get_peers};
 use crate::traversal::put_data::{put_immutable, put_mutable, DataCallback};
 use crate::traversal::refresh::{bootstrap, refresh};
 use crate::traversal::sample_infohashes::sample_infohashes;
-use crate::traversal::{LookupStatus, Traversals};
+use crate::traversal::{LookupStatus, Traversal, Traversals};
 use crate::types::PublicKey;
 
 pub mod counters;
@@ -139,6 +140,8 @@ pub struct Node {
     last_storage_tick: Time,
     /// Last bootstrap or refresh of our own ID (`m_last_self_refresh`).
     last_self_refresh: Time,
+    /// Lookups the owner wants completion events for: (tag, traversal).
+    tracked: Vec<(u64, TraversalId)>,
 }
 
 /// Chooses the ID a new node starts with (libtorrent
@@ -202,6 +205,7 @@ impl Node {
             settings,
             last_storage_tick: Time::ZERO,
             last_self_refresh: Time::ZERO,
+            tracked: Vec::new(),
         }
     }
 
@@ -330,7 +334,39 @@ impl Node {
         for ep in pings {
             self.add_node(env, ep);
         }
+        self.report_finished(env);
         result
+    }
+
+    /// Emits [`Event::LookupFinished`] for every tracked lookup that has
+    /// left the arena.
+    fn report_finished(&mut self, env: &mut NodeEnv<'_>) {
+        let traversals = &self.traversals;
+        self.tracked.retain(|(tag, tid)| {
+            let alive = traversals.get(*tid).is_some();
+            if !alive {
+                env.events.push(Event::LookupFinished { tag: *tag });
+            }
+            alive
+        });
+    }
+
+    /// Builds a traversal with `make`, spawns it, and, when `tag` is given,
+    /// reports its end as [`Event::LookupFinished`].
+    fn spawn_tracked(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        tag: Option<u64>,
+        make: impl FnOnce(&mut NodeCtx<'_>) -> Box<dyn Traversal>,
+    ) {
+        let tid = self.with_ctx(env, |ctx, traversals| {
+            let t = make(ctx);
+            traversals.spawn(ctx, t)
+        });
+        if let Some(tag) = tag {
+            self.tracked.push((tag, tid));
+            self.report_finished(env);
+        }
     }
 
     /// Re-derives the ID from the externally visible address if the
@@ -510,22 +546,28 @@ impl Node {
     /// those the IP filter blocks, falling back to the table's closest
     /// nodes and the router nodes when `nodes` is empty. `notify` makes its
     /// completion produce [`Event::BootstrapDone`].
-    pub fn bootstrap(&mut self, env: &mut NodeEnv<'_>, nodes: &[SocketAddr], notify: bool) {
+    pub fn bootstrap(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        nodes: &[SocketAddr],
+        notify: bool,
+        tag: Option<u64>,
+    ) {
         self.last_self_refresh = env.now;
-        self.with_ctx(env, |ctx, traversals| {
-            let t = bootstrap(ctx, nodes, notify);
-            traversals.spawn(ctx, t);
-        });
+        self.spawn_tracked(env, tag, |ctx| bootstrap(ctx, nodes, notify));
     }
 
     /// Starts a `get_peers` lookup whose peers arrive as
     /// [`Event::GetPeersReply`] (libtorrent `node::get_peers` without a
     /// nodes callback).
-    pub fn get_peers(&mut self, env: &mut NodeEnv<'_>, info_hash: NodeId, flags: AnnounceFlags) {
-        self.with_ctx(env, |ctx, traversals| {
-            let t = get_peers(ctx, info_hash, flags);
-            traversals.spawn(ctx, t);
-        });
+    pub fn get_peers(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        info_hash: NodeId,
+        flags: AnnounceFlags,
+        tag: Option<u64>,
+    ) {
+        self.spawn_tracked(env, tag, |ctx| get_peers(ctx, info_hash, flags));
     }
 
     /// Looks up `info_hash` and announces `listen_port` to the closest
@@ -537,11 +579,9 @@ impl Node {
         info_hash: NodeId,
         listen_port: u16,
         flags: AnnounceFlags,
+        tag: Option<u64>,
     ) {
-        self.with_ctx(env, |ctx, traversals| {
-            let t = announce(ctx, info_hash, listen_port, flags);
-            traversals.spawn(ctx, t);
-        });
+        self.spawn_tracked(env, tag, |ctx| announce(ctx, info_hash, listen_port, flags));
     }
 
     /// Looks an immutable item up by `target` (SHA-1 of its bencoded
@@ -593,12 +633,15 @@ impl Node {
 
     /// Sends a BEP 51 `sample_infohashes` to `ep`; the answer is an
     /// [`Event::SampleInfohashes`] (libtorrent `node::sample_infohashes`).
-    pub fn sample_infohashes(&mut self, env: &mut NodeEnv<'_>, ep: SocketAddr, target: NodeId) {
+    pub fn sample_infohashes(
+        &mut self,
+        env: &mut NodeEnv<'_>,
+        ep: SocketAddr,
+        target: NodeId,
+        tag: Option<u64>,
+    ) {
         self.counters.sample_infohashes_out += 1;
-        self.with_ctx(env, |ctx, traversals| {
-            let t = sample_infohashes(ctx, ep, target);
-            traversals.spawn(ctx, t);
-        });
+        self.spawn_tracked(env, tag, |ctx| sample_infohashes(ctx, ep, target));
     }
 
     /// Sends an arbitrary request to `ep`; the answer, or `None` on
@@ -610,11 +653,9 @@ impl Node {
         ep: SocketAddr,
         request: Entry,
         token: u64,
+        tag: Option<u64>,
     ) {
-        self.with_ctx(env, |ctx, traversals| {
-            let t = direct_request(ctx, ep, request, token);
-            traversals.spawn(ctx, t);
-        });
+        self.spawn_tracked(env, tag, |ctx| direct_request(ctx, ep, request, token));
     }
 
     /// Aborts every outstanding request and refuses new ones (libtorrent

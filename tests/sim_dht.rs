@@ -112,11 +112,12 @@ fn test_sim_dht_dual_stack_get_peers() {
     sim.poke(me);
     sim.run_for(Duration::from_secs(2));
     let now = sim.now();
-    sim.peers[me].dht.get_peers(ih, now);
+    let op = sim.peers[me].dht.get_peers(ih, now);
     sim.poke(me);
     sim.run_for(Duration::from_secs(2));
     let (mut v4, mut v6) = (false, false);
-    for e in sim.peers[me].dht.drain_events() {
+    let events = sim.peers[me].dht.drain_events();
+    for e in results_of(&events, op) {
         if let Event::GetPeersReply { peers, .. } = e {
             v4 |= peers.iter().any(SocketAddr::is_ipv4);
             v6 |= peers.iter().any(SocketAddr::is_ipv6);
@@ -409,8 +410,9 @@ fn test_sim_dht_concurrent_same_target_operations() {
     assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
 }
 
-/// `direct_request` and `sample_infohashes` through the tracker: the answers
-/// arrive as events, a request to a dead address times out with `None`.
+/// `direct_request` and `sample_infohashes` through the tracker: each
+/// answer is tagged with its operation, a request to a dead address times
+/// out with `None`, and every operation ends exactly once.
 #[test]
 fn test_sim_dht_direct_request_and_sample() {
     let mut sim = SimNet::new(5);
@@ -421,31 +423,138 @@ fn test_sim_dht_direct_request_and_sample() {
     let now = sim.now();
     let mut ping = Entry::dict();
     ping.set("q", "ping");
-    sim.peers[me]
+    let d1 = sim.peers[me]
         .dht
-        .direct_request(routers4[0], ping.clone(), 7, now);
-    sim.peers[me]
+        .direct_request(routers4[0], ping.clone(), now);
+    let d2 = sim.peers[me]
         .dht
-        .direct_request(ep("40.1.1.1", 1), ping, 8, now);
-    sim.peers[me]
+        .direct_request(ep("40.1.1.1", 1), ping, now);
+    let s1 = sim.peers[me]
         .dht
         .sample_infohashes(routers4[1], Sha1Hash([1; 20]), now);
+    let s2 = sim.peers[me]
+        .dht
+        .sample_infohashes(routers4[1], Sha1Hash([2; 20]), now);
     sim.poke(me);
     sim.run_for(Duration::from_secs(20));
     let events = sim.peers[me].dht.drain_events();
-    let direct = |token: u64| {
-        events.iter().find_map(|e| match e {
-            Event::DirectResponse {
-                token: t, reply, ..
-            } if *t == token => Some(reply.clone()),
+    let reply_of = |op: OpId| {
+        results_of(&events, op).into_iter().find_map(|e| match e {
+            Event::DirectResponse { reply, .. } => Some(reply.clone()),
             _ => None,
         })
     };
-    assert!(matches!(direct(7), Some(Some(_))));
-    assert_eq!(direct(8), Some(None));
-    assert!(events
+    assert!(matches!(reply_of(d1), Some(Some(_))));
+    assert_eq!(reply_of(d2), Some(None));
+    for s in [s1, s2] {
+        assert!(results_of(&events, s)
+            .iter()
+            .any(|e| matches!(e, Event::SampleInfohashes { from, .. } if *from == routers4[1])));
+    }
+    for op in [d1, d2, s1, s2] {
+        assert_eq!(ends_of(&events, op), 1, "operation {op:?} ends once");
+    }
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
+}
+
+/// How many events end `op`.
+fn ends_of(events: &[Event], op: OpId) -> usize {
+    events
         .iter()
-        .any(|e| matches!(e, Event::SampleInfohashes { from, .. } if *from == routers4[1])));
+        .filter(|e| e.ends_operation() && e.op() == Some(op))
+        .count()
+}
+
+/// Peer lookups and announces are operations too: each of two concurrent
+/// lookups of one info-hash gets the announced peers tagged with its own id,
+/// and each completes once.
+#[test]
+fn test_sim_dht_peer_operations_complete() {
+    let mut sim = SimNet::new(7);
+    let (_, routers4) = build_network(&mut sim, 60, false, 71);
+    let (me, _) = session(&mut sim, &routers4, &[], 700);
+    sim.run_for(Duration::from_secs(2));
+    sim.peers[me].dht.drain_events();
+    let ih = Sha1Hash([8; 20]);
+    let now = sim.now();
+    let a = sim.peers[me]
+        .dht
+        .announce(ih, 4321, AnnounceFlags::EMPTY, now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(30));
+    let events = sim.peers[me].dht.drain_events();
+    assert_eq!(ends_of(&events, a), 1);
+    assert!(matches!(
+        events
+            .iter()
+            .find(|e| e.op() == Some(a) && e.ends_operation()),
+        Some(Event::OperationDone { .. })
+    ));
+
+    let now = sim.now();
+    let g1 = sim.peers[me].dht.get_peers(ih, now);
+    let g2 = sim.peers[me].dht.get_peers(ih, now);
+    assert_ne!(g1, g2);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(30));
+    let events = sim.peers[me].dht.drain_events();
+    for g in [g1, g2] {
+        let peers: Vec<_> = results_of(&events, g)
+            .into_iter()
+            .flat_map(|e| match e {
+                Event::GetPeersReply { peers, .. } => peers.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(peers.iter().any(|p| p.port() == 4321), "{g:?}: {peers:?}");
+        let mut dedup = peers.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), peers.len(), "each peer once per operation");
+        assert_eq!(ends_of(&events, g), 1);
+    }
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
+}
+
+/// `Dht::bootstrap` is an operation that ends once the lookup finished.
+#[test]
+fn test_sim_dht_bootstrap_operation_completes() {
+    let mut sim = SimNet::new(8);
+    let (_, routers4) = build_network(&mut sim, 30, false, 81);
+    let (me, _) = session(&mut sim, &routers4, &[], 800);
+    sim.run_for(Duration::from_secs(30));
+    sim.peers[me].dht.drain_events();
+    let now = sim.now();
+    let op = sim.peers[me].dht.bootstrap(&routers4, now);
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(30));
+    let events = sim.peers[me].dht.drain_events();
+    assert_eq!(ends_of(&events, op), 1);
+}
+
+/// Operations that are still running when a socket is removed are
+/// cancelled, whatever their kind.
+#[test]
+fn test_sim_dht_remove_socket_cancels_operations() {
+    let now = Time::ZERO + Duration::from_secs(1000);
+    let mut dht = Dht::builder(net_settings())
+        .rng(Box::new(TestRng::new(1)))
+        .build();
+    let sock = dht.add_socket(ep("10.0.0.1", 6881), None, now);
+    dht.add_router_node(ep("40.1.1.1", 1));
+    let ih = Sha1Hash([6; 20]);
+    let ops = [
+        dht.get_peers(ih, now),
+        dht.announce(ih, 1, AnnounceFlags::EMPTY, now),
+        dht.get_immutable_item(ih, now),
+    ];
+    assert_eq!(dht.operations_in_flight(), 3);
+    dht.remove_socket(sock);
+    let events = dht.drain_events();
+    for op in ops {
+        assert_eq!(ends_of(&events, op), 1, "{op:?}");
+    }
+    assert_eq!(dht.operations_in_flight(), 0);
 }
 
 /// `Dht::shutdown` aborts outstanding requests: nothing stays in the
@@ -459,7 +568,7 @@ fn test_sim_dht_shutdown_aborts_requests() {
     let sock = dht.add_socket(ep("10.0.0.1", 6881), None, now);
     let mut ping = Entry::dict();
     ping.set("q", "ping");
-    dht.direct_request(ep("40.1.1.1", 1), ping, 3, now);
+    dht.direct_request(ep("40.1.1.1", 1), ping, now);
     assert_eq!(dht.node(sock).unwrap().rpc().num_transactions(), 1);
     dht.shutdown(now);
     let node = dht.node(sock).unwrap();
@@ -487,7 +596,7 @@ fn test_sim_dht_shutdown_cancels_operations() {
     // has (nothing), anything that cannot be finished is cancelled
     let events = dht.drain_events();
     for op in [g, p, p2] {
-        let ends = events.iter().filter(|e| e.op() == Some(op)).count();
+        let ends = ends_of(&events, op);
         assert_eq!(ends, 1, "operation {op:?}: {events:?}");
     }
     assert_eq!(dht.operations_in_flight(), 0);
