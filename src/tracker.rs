@@ -768,6 +768,16 @@ impl Dht {
         }
     }
 
+    /// Stops the timers and aborts every outstanding request on every node
+    /// (`stop` plus the teardown of libtorrent's `~rpc_manager`). The
+    /// tracker answers no more responses afterwards.
+    pub fn shutdown(&mut self, now: Time) {
+        self.stop();
+        for idx in 0..self.nodes.len() {
+            self.with_node(idx, now, |node, env| node.shutdown(env));
+        }
+    }
+
     /// Stops the timers (libtorrent `dht_tracker::stop`). Datagrams that
     /// arrive afterwards are still handled; queued output stays queued.
     pub fn stop(&mut self) {

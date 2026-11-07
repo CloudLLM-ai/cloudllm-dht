@@ -617,6 +617,12 @@ impl Node {
         });
     }
 
+    /// Aborts every outstanding request and refuses new ones (libtorrent
+    /// `~rpc_manager`); call once before dropping the node.
+    pub fn shutdown(&mut self, env: &mut NodeEnv<'_>) {
+        self.with_ctx(env, |ctx, traversals| traversals.shutdown(ctx));
+    }
+
     /// Pings `ep` and adds it to the routing table if it answers
     /// (libtorrent `node::add_node`). Nodes of the other family and
     /// filtered addresses are ignored.

@@ -604,7 +604,10 @@ fn handle(dht: &mut Dht, c: Command, pending: &mut Pending, token: &mut u64, now
         Command::State(reply) => {
             let _ = reply.send(dht.state());
         }
-        Command::Shutdown => return false,
+        Command::Shutdown => {
+            dht.shutdown(now);
+            return false;
+        }
     }
     true
 }

@@ -364,3 +364,23 @@ fn test_sim_dht_direct_request_and_sample() {
         .iter()
         .any(|e| matches!(e, Event::SampleInfohashes { from, .. } if *from == routers4[1])));
 }
+
+/// `Dht::shutdown` aborts outstanding requests: nothing stays in the
+/// transaction table and no observer or lookup is left behind.
+#[test]
+fn test_sim_dht_shutdown_aborts_requests() {
+    let now = Time::ZERO + Duration::from_secs(1000);
+    let mut dht = Dht::builder(net_settings())
+        .rng(Box::new(TestRng::new(1)))
+        .build();
+    let sock = dht.add_socket(ep("10.0.0.1", 6881), None, now);
+    let mut ping = Entry::dict();
+    ping.set("q", "ping");
+    dht.direct_request(ep("40.1.1.1", 1), ping, 3, now);
+    assert_eq!(dht.node(sock).unwrap().rpc().num_transactions(), 1);
+    dht.shutdown(now);
+    let node = dht.node(sock).unwrap();
+    assert_eq!(node.rpc().num_transactions(), 0);
+    assert_eq!(node.rpc().num_allocated_observers(), 0);
+    assert_eq!(node.num_lookups(), 0);
+}
