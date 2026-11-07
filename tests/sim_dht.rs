@@ -601,3 +601,86 @@ fn test_sim_dht_shutdown_cancels_operations() {
     }
     assert_eq!(dht.operations_in_flight(), 0);
 }
+
+/// A node that learns of an entry carrying its own endpoint under another
+/// ID (a peer can report any `ip:port` in `nodes`) must not loop forever
+/// asking itself: every operation still ends.
+#[test]
+fn test_sim_dht_node_listed_at_own_address_does_not_stall_operations() {
+    let mut now = Time::ZERO + Duration::from_secs(1000);
+    let me_addr = ep("30.0.0.1", 6881);
+    let mut dht = Dht::builder(net_settings())
+        .rng(Box::new(TestRng::new(1)))
+        .build();
+    let sock = dht.add_socket(me_addr, Some(me_addr.ip()), now);
+    dht.start(now);
+    let ghost = Sha1Hash([0x42; 20]);
+    dht.node_mut(sock)
+        .unwrap()
+        .table_mut()
+        .node_seen(ghost, me_addr, 10, now);
+    let op = dht.get_immutable_item(Sha1Hash([9; 20]), now);
+    let mut steps = 0;
+    while dht.operations_in_flight() > 0 {
+        while let Some(d) = dht.poll_transmit() {
+            // everything sent to ourselves is looped back
+            if d.to == me_addr {
+                dht.incoming_packet(sock, me_addr, &d.payload, now);
+            }
+        }
+        now = now + Duration::from_secs(1);
+        dht.poll(now);
+        steps += 1;
+        assert!(steps < 300, "the operation never ended");
+    }
+    let events = dht.drain_events();
+    assert_eq!(ends_of(&events, op), 1);
+}
+
+/// Regression test for the `dht_ops` finding `crash-fc57aea…`: hundreds of
+/// puts of one slot queue up and run one at a time, which is slow but not
+/// stuck. Every one of them ends exactly once, in the order started, with
+/// each data callback seeing the sequence number the previous one wrote.
+#[test]
+fn test_sim_dht_queued_puts_of_one_slot_all_complete_in_order() {
+    use cloudllm_dht::ed25519::create_keypair;
+    use cloudllm_dht::item::Item;
+    use cloudllm_dht::types::SequenceNumber;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    let mut sim = SimNet::new(9);
+    let (_, routers4) = build_network(&mut sim, 30, false, 91);
+    let (me, _) = session(&mut sim, &routers4, &[], 900);
+    sim.run_for(Duration::from_secs(2));
+    sim.peers[me].dht.drain_events();
+    let (pk, sk) = create_keypair(&[1u8; 32]);
+    let last_seq = Arc::new(AtomicI64::new(0));
+    let ops: Vec<OpId> = (0..60)
+        .map(|n| {
+            let seen = Arc::clone(&last_seq);
+            let cb = Arc::new(move |i: &mut Item| {
+                let next = i.seq().0.max(0) + 1;
+                // the callbacks run in order: each sees the previous seq
+                assert!(next > seen.load(Ordering::SeqCst));
+                seen.store(next, Ordering::SeqCst);
+                *i = Item::signed(Entry::from(n as i64), b"", SequenceNumber(next), &pk, &sk)
+                    .unwrap();
+            });
+            let now = sim.now();
+            sim.peers[me].dht.put_mutable_item(pk, b"", cb, now)
+        })
+        .collect();
+    sim.poke(me);
+    sim.run_for(Duration::from_secs(900));
+    let events = sim.peers[me].dht.drain_events();
+    let finished: Vec<OpId> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::OperationDone { op } => Some(*op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished, ops, "all puts end once, in the order started");
+    assert_eq!(sim.peers[me].dht.operations_in_flight(), 0);
+}

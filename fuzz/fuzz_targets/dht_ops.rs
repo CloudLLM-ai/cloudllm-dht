@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cloudllm_dht::announce_flags::AnnounceFlags;
-use cloudllm_dht::bencode::Entry;
+use cloudllm_dht::bencode::{decode, Entry};
 use cloudllm_dht::dht_state::DhtState;
 use cloudllm_dht::ed25519::create_keypair;
 use cloudllm_dht::events::OpId;
@@ -46,6 +46,8 @@ struct Net {
     now: Time,
     /// Per operation: how many terminal events it has seen.
     ended: BTreeMap<OpId, u32>,
+    /// The last datagrams the DUT sent, for failure messages.
+    trace: VecDeque<String>,
 }
 
 fn settings() -> DhtSettings {
@@ -87,6 +89,7 @@ impl Net {
             flight: VecDeque::new(),
             now,
             ended: BTreeMap::new(),
+            trace: VecDeque::new(),
         };
         n.collect();
         n
@@ -113,6 +116,18 @@ impl Net {
     /// Moves everything the nodes produced into the flight queue.
     fn collect(&mut self) {
         while let Some(Datagram { to, payload, .. }) = self.dut.poll_transmit() {
+            if let Ok(m) = decode(&payload) {
+                self.trace.push_back(format!(
+                    "{to} {}:{} t={:?} deliverable={}",
+                    String::from_utf8_lossy(m.dict_find_string_value(b"y", b"")),
+                    String::from_utf8_lossy(m.dict_find_string_value(b"q", b"")),
+                    m.dict_find_string_value(b"t", b""),
+                    self.dest_of(to).is_some()
+                ));
+                if self.trace.len() > 16 {
+                    self.trace.pop_front();
+                }
+            }
             if let Some(d) = self.dest_of(to) {
                 self.flight.push_back((d, self.dut_addr, payload));
             }
@@ -168,14 +183,22 @@ fn item_cb(key: u8, text: u8) -> Arc<dyn Fn(&mut Item) + Send + Sync> {
     })
 }
 
+macro_rules! push_op {
+    ($v:ident, $e:expr $(,)?) => {{
+        let e = $e;
+        let name = stringify!($e);
+        $v.push((e, if name.contains("get_immutable") { "get_immutable" } else if name.contains("get_mutable") { "get_mutable" } else if name.contains("put_immutable") { "put_immutable" } else if name.contains("put_mutable") { "put_mutable" } else if name.contains("get_peers") { "get_peers" } else if name.contains("announce") { "announce" } else if name.contains("bootstrap") { "bootstrap" } else if name.contains("sample") { "sample" } else { "direct" }));
+    }};
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&seed, ops)) = data.split_first() else {
         return;
     };
     let mut net = Net::new(seed);
-    let mut started: Vec<OpId> = Vec::new();
+    let mut started: Vec<(OpId, &'static str)> = Vec::new();
     let mut i = 0;
-    let mut next = |i: &mut usize| {
+    let next = |i: &mut usize| {
         let b = ops.get(*i).copied();
         *i += 1;
         b
@@ -184,21 +207,21 @@ fuzz_target!(|data: &[u8]| {
         let arg = next(&mut i).unwrap_or(0);
         let now = net.now;
         match op % 15 {
-            0 => started.push(net.dut.get_immutable_item(Sha1Hash([arg % 4; 20]), now)),
+            0 => push_op!(started, net.dut.get_immutable_item(Sha1Hash([arg % 4; 20]), now)),
             1 => {
                 let (pk, _) = create_keypair(&[arg % 3; 32]);
-                started.push(net.dut.get_mutable_item(pk, b"", now));
+                push_op!(started, net.dut.get_mutable_item(pk, b"", now));
             }
-            2 => started.push(
+            2 => push_op!(started, 
                 net.dut
                     .put_immutable_item(Entry::from(vec![arg % 4]), now),
             ),
             3 => {
                 let (pk, _) = create_keypair(&[arg % 3; 32]);
-                started.push(net.dut.put_mutable_item(pk, b"", item_cb(arg % 3, arg), now));
+                push_op!(started, net.dut.put_mutable_item(pk, b"", item_cb(arg % 3, arg), now));
             }
-            4 => started.push(net.dut.get_peers(Sha1Hash([arg % 4; 20]), now)),
-            5 => started.push(net.dut.announce(
+            4 => push_op!(started, net.dut.get_peers(Sha1Hash([arg % 4; 20]), now)),
+            5 => push_op!(started, net.dut.announce(
                 Sha1Hash([arg % 4; 20]),
                 6881,
                 AnnounceFlags::EMPTY,
@@ -226,17 +249,17 @@ fuzz_target!(|data: &[u8]| {
             }
             12 => {
                 let seeds: Vec<SocketAddr> = net.peers.iter().map(|p| p.2).collect();
-                started.push(net.dut.bootstrap(&seeds, now));
+                push_op!(started, net.dut.bootstrap(&seeds, now));
             }
             13 => {
                 let ep = net.peers[usize::from(arg) % PEERS].2;
-                started.push(net.dut.sample_infohashes(ep, Sha1Hash([arg; 20]), now));
+                push_op!(started, net.dut.sample_infohashes(ep, Sha1Hash([arg; 20]), now));
             }
             _ => {
                 let ep = net.peers[usize::from(arg) % PEERS].2;
                 let mut req = Entry::dict();
                 req.set("q", "ping");
-                started.push(net.dut.direct_request(ep, req, now));
+                push_op!(started, net.dut.direct_request(ep, req, now));
             }
         }
         assert!(net.flight.len() <= MAX_QUEUE);
@@ -245,7 +268,10 @@ fuzz_target!(|data: &[u8]| {
     // counted so a drain that does not terminate fails with a message
     // instead of hanging the fuzzer.
     const MAX_DELIVERIES: usize = 300_000;
-    const MAX_ROUNDS: usize = 600;
+    // Puts of one slot run one after another and each may need a request
+    // timeout (the DoS blocker drops responses of chatty peers), so the
+    // allowance grows with the number of operations started.
+    let max_rounds: usize = 200 + 12 * started.len();
     let mut deliveries = 0usize;
     let mut rounds = 0usize;
     loop {
@@ -264,17 +290,40 @@ fuzz_target!(|data: &[u8]| {
         }
         net.advance(5_000);
         rounds += 1;
-        assert!(
-            rounds <= MAX_ROUNDS,
-            "{} operations still running after {rounds} clock steps ({} s) with no traffic",
-            net.dut.operations_in_flight(),
-            rounds * 5
-        );
+        if rounds > max_rounds {
+            let stuck: Vec<_> = started
+                .iter()
+                .filter(|(op, _)| net.ended.get(op).copied().unwrap_or(0) == 0)
+                .collect();
+            let status = net.dut.status(net.now);
+            eprintln!("status: {status:?}");
+            eprintln!("last sends: {:#?}", net.trace);
+            if let Some(n) = net.dut.node(net.dut_sock) {
+                eprintln!(
+                    "lookups {} transactions {} observers {}",
+                    n.num_lookups(),
+                    n.rpc().num_transactions(),
+                    n.rpc().num_allocated_observers()
+                );
+            }
+            panic!(
+                "{} operations still running after {rounds} clock steps ({} s) with no traffic: {stuck:?}",
+                net.dut.operations_in_flight(),
+                rounds * 5
+            );
+        }
+    }
+    if std::env::var_os("DHT_OPS_VERBOSE").is_some() {
+        eprintln!("drained in {rounds} rounds, {} ops", started.len());
     }
     net.dut.shutdown(net.now);
     net.collect();
-    for op in started {
-        assert_eq!(net.ended.get(&op).copied(), Some(1), "{op:?} did not end exactly once");
+    for (op, kind) in started {
+        assert_eq!(
+            net.ended.get(&op).copied(),
+            Some(1),
+            "{kind} {op:?} did not end exactly once"
+        );
     }
     assert_eq!(net.dut.operations_in_flight(), 0);
 });
