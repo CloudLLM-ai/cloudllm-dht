@@ -571,3 +571,9 @@ libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*
 | 4 | `src/kademlia/dht_tracker.cpp` `get_mutable_item_callback` | the final authoritative callback passes the *last node's* item, which may be empty although another stack found one | the authoritative event carries the best item found across nodes | `sim_dht::test_sim_dht_dual_stack_mutable_item` |
 | 5 | `dht_tracker::has_quota` with `m_last_tick` set in the constructor | n/a | the quota clock starts at the first query (the tracker is built without a time) | `test_quota_unstarted_begins_with_one_second`, `test_sim_dht_rate_limit` |
 | 6 | `src/kademlia/dht_tracker.cpp` `incoming_packet` | n/a | `SendQuota` and `Transport` are constructed per call; outgoing messages carry the `CD` client tag instead of `LT` | |
+| 7 | `src/kademlia/dht_tracker.cpp` `get_immutable_item_ctx` etc. | one `std::function` per operation keeps results apart | every operation has an `OpId`; results are `Event::Operation { op, .. }`. Concurrent gets of one target coalesce, puts of one target run in order; shutdown or socket removal cancels what is in flight (`Event::OperationCancelled`) | `test_sim_dht_concurrent_same_target_operations`, `test_driver_concurrent_same_target_operations`, `test_sim_dht_shutdown_cancels_operations`, fuzz `dht_ops` |
+
+### Test deviation: `simulation/test_dht.cpp::dht_bootstrap`
+
+The ported `test_sim_dht_bootstrap` additionally starts a `get_peers` for a fresh random info-hash every simulated second. libtorrent's version runs a full session with a downloading torrent whose peer searches continuously exercise the DHT; with only the bootstrap and the 5-second refresh pings, 3000 nodes yield a routing table of depth 7 in 500 s (the extended table needs more than 128 verified nodes in the far half before it splits). The extra lookups stand in for the session's own searches; the assertions (depth >= 8, nodes >= 50) are libtorrent's.
+
