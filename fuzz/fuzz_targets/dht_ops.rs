@@ -8,8 +8,9 @@
 //! announces, bootstrap, samples, direct requests).
 //!
 //! Invariants: no panic; the output queues stay bounded; every operation
-//! that was started ends exactly once (`OperationDone`, or
-//! `OperationCancelled` at shutdown), no operation is tagged after it ended,
+//! that was started ends exactly once (`OperationDone`,
+//! `OperationRejected` when a bound is hit, or `OperationCancelled` at
+//! shutdown), no operation is tagged after it ended,
 //! and `operations_in_flight` is zero at the end.
 #![no_main]
 
@@ -46,6 +47,8 @@ struct Net {
     now: Time,
     /// Per operation: how many terminal events it has seen.
     ended: BTreeMap<OpId, u32>,
+    /// Short names of the events each operation saw, for failure messages.
+    history: BTreeMap<OpId, Vec<String>>,
     /// The last datagrams the DUT sent, for failure messages.
     trace: VecDeque<String>,
 }
@@ -89,6 +92,7 @@ impl Net {
             flight: VecDeque::new(),
             now,
             ended: BTreeMap::new(),
+            history: BTreeMap::new(),
             trace: VecDeque::new(),
         };
         n.collect();
@@ -105,6 +109,9 @@ impl Net {
     fn note_events(&mut self) {
         for ev in self.dut.drain_events() {
             let Some(op) = ev.op() else { continue };
+            self.history.entry(op).or_default().push(
+                format!("{ev:?}").chars().take(60).collect(),
+            );
             let count = self.ended.entry(op).or_default();
             assert_eq!(*count, 0, "event for {op:?} after it ended: {ev:?}");
             if ev.ends_operation() {
@@ -268,9 +275,9 @@ fuzz_target!(|data: &[u8]| {
     // counted so a drain that does not terminate fails with a message
     // instead of hanging the fuzzer.
     const MAX_DELIVERIES: usize = 300_000;
-    // Puts of one slot run one after another and each may need a request
-    // timeout (the DoS blocker drops responses of chatty peers), so the
-    // allowance grows with the number of operations started.
+    // Puts of one slot run one after another (at most 65 per slot, the rest
+    // are rejected) and each may need a request timeout, so the allowance
+    // grows with the number of operations started.
     let max_rounds: usize = 200 + 12 * started.len();
     let mut deliveries = 0usize;
     let mut rounds = 0usize;
@@ -327,7 +334,8 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(
             net.ended.get(&op).copied(),
             Some(1),
-            "{kind} {op:?} did not end exactly once"
+            "{kind} {op:?} did not end exactly once: {:?}",
+            net.history.get(&op)
         );
     }
     assert_eq!(net.dut.operations_in_flight(), 0);
