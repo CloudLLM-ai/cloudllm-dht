@@ -320,26 +320,26 @@ WP4's.
 | `include/libtorrent/kademlia/dos_blocker.hpp + src/kademlia/dos_blocker.cpp` | `src/dos_blocker.rs` | WP3 | done |  |
 | `include/libtorrent/kademlia/dht_state.hpp + src/kademlia/dht_state.cpp` | `src/dht_state.rs` | WP3 | done | `DhtState`, `read_dht_state`, `save_dht_state`, `extract_node_ids` |
 | `include/libtorrent/kademlia/announce_flags.hpp` | `src/announce_flags.rs` | WP3 | done | tiny; shared with WP2/WP4 so it lands first |
-| `include/libtorrent/kademlia/node.hpp + src/kademlia/node.cpp` | `src/node.rs` | WP4 | todo | query handlers, token generation, `incoming`, `tick` |
-| `include/libtorrent/kademlia/dht_tracker.hpp + src/kademlia/dht_tracker.cpp` | `src/tracker.rs` | WP4 | todo | multi-node (v4/v6) owner, timers, rate limiter |
-| `include/libtorrent/kademlia/dht_observer.hpp` | `src/events.rs` | WP4 | todo | alerts as an `Event` stream |
-| `(new) tokio UDP driver` | `src/driver.rs (feature `tokio-driver`)` | WP4 | todo | not in libtorrent: asio is its driver |
+| `include/libtorrent/kademlia/node.hpp + src/kademlia/node.cpp` | `src/node.rs` | WP4 | done | query handlers, token generation, `incoming`, `tick` |
+| `include/libtorrent/kademlia/dht_tracker.hpp + src/kademlia/dht_tracker.cpp` | `src/tracker.rs` | WP4 | done | multi-node (v4/v6) owner, timers, rate limiter |
+| `include/libtorrent/kademlia/dht_observer.hpp` | `src/events.rs` | WP4 | done | alerts as an `Event` stream |
+| `(new) tokio UDP driver` | `src/driver.rs (feature `tokio-driver`)` | WP4 | done | not in libtorrent: asio is its driver |
 
 ## Test cases: `test/test_dht.cpp`
 
 | TEST_CASE | Rust test file | WP / status |
 |---|---|---|
-| `ping` | `tests/dht_node.rs` | WP4 |
-| `invalid_message` | `tests/dht_node.rs` | WP4 |
+| `ping` | `tests/dht_node.rs` | WP4 done |
+| `invalid_message` | `tests/dht_node.rs` | WP4 done |
 | `node_id_testing` | `tests/node_id.rs` | done |
-| `get_peers_announce` | `tests/dht_node.rs` | WP4 |
-| `scrape_v4` | `tests/dht_node.rs` | WP4 |
-| `scrape_v6` | `tests/dht_node.rs` | WP4 |
-| `id_enforcement_v4` | `tests/dht_node.rs` | WP4 |
-| `id_enforcement_v6` | `tests/dht_node.rs` | WP4 |
+| `get_peers_announce` | `tests/dht_node.rs` | WP4 done |
+| `scrape_v4` | `tests/dht_node.rs` | WP4 done |
+| `scrape_v6` | `tests/dht_node.rs` | WP4 done |
+| `id_enforcement_v4` | `tests/dht_node.rs` | WP4 done |
+| `id_enforcement_v6` | `tests/dht_node.rs` | WP4 done |
 | `bloom_filter` | `tests/bloom_filter.rs` | WP3 done |
-| `put_v4` | `tests/dht_node.rs` | WP4 |
-| `put_v6` | `tests/dht_node.rs` | WP4 |
+| `put_v4` | `tests/dht_node.rs` | WP4 done |
+| `put_v6` | `tests/dht_node.rs` | WP4 done |
 | `routing_table_v4` | `tests/routing_table.rs` | done |
 | `routing_table_v6` | `tests/routing_table.rs` | done |
 | `bootstrap_v4` | `tests/traversal.rs` | done |
@@ -358,8 +358,8 @@ WP4's.
 | `immutable_put` | `tests/traversal_items.rs` | done |
 | `mutable_put` | `tests/traversal_items.rs` | done |
 | `traversal_done` | `tests/traversal_items.rs` | done |
-| `dht_dual_stack` | `tests/dht_node.rs` | WP4 |
-| `multi_home` | `tests/dht_node.rs` | WP4 |
+| `dht_dual_stack` | `tests/dht_node.rs` | WP4 done |
+| `multi_home` | `tests/dht_node.rs` | WP4 done |
 | `signing_test1` | `tests/item.rs` | WP3 done |
 | `signing_test2` | `tests/item.rs` | WP3 done |
 | `signing_test3` | `tests/item.rs` | WP3 done |
@@ -370,8 +370,8 @@ WP4's.
 | `routing_table_extended` | `tests/routing_table.rs` | done |
 | `routing_table_set_id` | `tests/routing_table.rs` | done |
 | `routing_table_for_each` | `tests/routing_table.rs` | done |
-| `node_set_id` | `tests/dht_node.rs` | WP4 |
-| `read_only_node` | `tests/dht_node.rs` | WP4 |
+| `node_set_id` | `tests/dht_node.rs` | WP4 done |
+| `read_only_node` | `tests/dht_node.rs` | WP4 done |
 | `rpc_reply_ignores_wrong_port` | `tests/rpc_manager.rs` | done |
 | `invalid_error_msg` | `tests/rpc_manager.rs` | done |
 | `unsorted_traversal_results` | `tests/traversal.rs` | done |
@@ -379,9 +379,9 @@ WP4's.
 | `node_id_bucket_distribution` | `tests/node_id.rs` | done |
 | `node_id_min_distance_exp` | `tests/node_id.rs` | done |
 | `dht_verify_node_address` | `tests/routing_table.rs` | done |
-| `dht_ip_filter` | `tests/dht_node.rs` | WP4 |
-| `dht_tracker_ip_filter` | `tests/dht_tracker.rs` | WP4 |
-| `dht_node_add_node_ip_filter` | `tests/dht_node.rs` | WP4 |
+| `dht_ip_filter` | `tests/dht_node.rs` | WP4 done |
+| `dht_tracker_ip_filter` | `tests/dht_tracker.rs` | WP4 done |
+| `dht_node_add_node_ip_filter` | `tests/dht_node.rs` | WP4 done |
 | `generate_prefix_mask` | `tests/node_id.rs` | done |
 | `distance_exp` | `tests/node_id.rs` | done |
 | `compare_ip_cidr` | `tests/routing_table.rs` | done |
@@ -392,10 +392,10 @@ WP4's.
 | `classify_prefix` | `tests/routing_table.rs` | done |
 | `replace_node_impl` | `tests/routing_table.rs` | done |
 | `all_in_same_bucket` | `tests/routing_table.rs` | done |
-| `rate_limit_non_positive` | `tests/dht_tracker.rs` | WP4 |
-| `rate_limit_int_max` | `tests/dht_tracker.rs` | WP4 |
-| `rate_limit_large_delta` | `tests/dht_tracker.rs` | WP4 |
-| `rate_limit_accrue_limit` | `tests/dht_tracker.rs` | WP4 |
+| `rate_limit_non_positive` | `tests/dht_tracker.rs` | WP4 done |
+| `rate_limit_int_max` | `tests/dht_tracker.rs` | WP4 done |
+| `rate_limit_large_delta` | `tests/dht_tracker.rs` | WP4 done |
+| `rate_limit_accrue_limit` | `tests/dht_tracker.rs` | WP4 done |
 | `dht` | `-` | n/a |
 
 ## Test cases: `test/test_dht_storage.cpp`
@@ -535,19 +535,19 @@ libtorrent drives these through `libsimulator`. Here they are deterministic mult
 
 | file | test | Rust | WP |
 |---|---|---|---|
-| `simulation/test_dht.cpp` | `dht_bootstrap` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht.cpp` | `dht_dual_stack_get_peers` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht.cpp` | `dht_dual_stack_immutable_item` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht.cpp` | `dht_dual_stack_mutable_item` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht_rate_limit.cpp` | `dht_rate_limit` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht_rate_limit.cpp` | `dht_delete_socket` | `tests/sim_dht.rs` | WP4 |
-| `simulation/test_dht_bootstrap.cpp` | `dht_bootstrap` | `tests/sim_dht.rs` | WP4 |
+| `simulation/test_dht.cpp` | `dht_bootstrap` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht.cpp` | `dht_dual_stack_get_peers` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht.cpp` | `dht_dual_stack_immutable_item` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht.cpp` | `dht_dual_stack_mutable_item` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht_rate_limit.cpp` | `dht_rate_limit` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht_rate_limit.cpp` | `dht_delete_socket` | `tests/sim_dht.rs` | WP4 done |
+| `simulation/test_dht_bootstrap.cpp` | `dht_bootstrap` | `tests/sim_dht.rs` | WP4 done |
 | `simulation/test_dht_storage.cpp` | `dht_storage_counters` | `tests/storage.rs` | WP3 done |
 | `simulation/test_dht_storage.cpp` | `dht_storage_infohashes_sample` | `tests/storage.rs` | WP3 done |
 
 ## Fuzzers (`fuzzers/src/`)
 
-libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*_reply.cpp`, `dht_put_item_request.cpp`. Mapped to `fuzz/fuzz_targets/`: `bdecode` (done), `message_parse` (done), and for the packages: `node_incoming` (`dht_node.cpp`, WP4), `traversal_replies` (the `dht_*_reply.cpp` family, WP2, done), `item_verify` (WP3), `state_load` (WP3), `storage_ops` (WP3), `routing_table_ops` (WP1, done).
+libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*_reply.cpp`, `dht_put_item_request.cpp`. Mapped to `fuzz/fuzz_targets/`: `bdecode` (done), `message_parse` (done), and for the packages: `node_incoming` (`dht_node.cpp`, WP4, done: `fuzz/fuzz_targets/node_incoming.rs`), `traversal_replies` (the `dht_*_reply.cpp` family, WP2, done), `item_verify` (WP3), `state_load` (WP3), `storage_ops` (WP3), `routing_table_ops` (WP1, done).
 
 
 
@@ -559,3 +559,15 @@ libtorrent ships `dht_node.cpp`, `bdecode_node.cpp`, `bdecode_entry.cpp`, `dht_*
 | 2 | `src/kademlia/get_peers.cpp:187,201` (`obfuscated_get_peers::invoke`) | the comment promises "shared prefix + 3" bits of the real info-hash, but `160 - distance_exp()` is `clz + 1`, so 4 bits past the shared prefix are revealed | **fixed**: shared prefix (`clz`) + 3, a privacy fix other nodes cannot tell apart from a random ID | `test_obfuscate_reveals_exactly_shared_prefix_plus_three_bits` |
 | 3 | `traversal_algorithm::status` over `m_running_requests` | a finished lookup stays listed (with an empty list) while requests that refer to it are in flight | kept, documented on `Traversals::status` | `test_bootstrap_pings_candidates_it_did_not_reach` |
 | 4 | `get_peers_observer::reply` | peers in a response that arrives after the lookup finished are still reported | kept (useful), documented | `test_late_response_still_reports_peers` |
+
+
+## libtorrent divergences and quirks found by WP4 (node, tracker)
+
+| # | libtorrent | behaviour | here | test |
+|---|---|---|---|---|
+| 1 | `src/kademlia/node.cpp:992` (`node::incoming_request`, `put` branch): `mutable_put = (seq && k && sig)` but `target = pub_key ? item_target_id(salt, pk) : item_target_id(buf)` | a put with `k` but no `seq`/`sig` is stored as an *immutable* item under the *mutable* target. A write token is handed to every `get`, so anyone can plant unsigned data there, and `get` checks the immutable table first, shadowing the real mutable item | **fixed**: a `k` without `seq` and `sig` is answered with a protocol error `incomplete mutable put` | `put_errors::test_put_with_key_but_no_signature_is_rejected` |
+| 2 | `src/kademlia/node.cpp` `incoming_error` after the response was filled | an error reply still carries `r: {id, p}` and any partial results | **changed**: an error carries only `y`, `t`, `ip` and `e` (smaller, so less amplification) | `test_invalid_message` |
+| 3 | `src/kademlia/dht_tracker.cpp` `state()` | every node's endpoints go into `dht_state::nodes`, v6 included; the serialiser splits them again | endpoints are split by family when the state is built | `driver::test_driver_state_and_direct_request` |
+| 4 | `src/kademlia/dht_tracker.cpp` `get_mutable_item_callback` | the final authoritative callback passes the *last node's* item, which may be empty although another stack found one | the authoritative event carries the best item found across nodes | `sim_dht::test_sim_dht_dual_stack_mutable_item` |
+| 5 | `dht_tracker::has_quota` with `m_last_tick` set in the constructor | n/a | the quota clock starts at the first query (the tracker is built without a time) | `test_quota_unstarted_begins_with_one_second`, `test_sim_dht_rate_limit` |
+| 6 | `src/kademlia/dht_tracker.cpp` `incoming_packet` | n/a | `SendQuota` and `Transport` are constructed per call; outgoing messages carry the `CD` client tag instead of `LT` | |

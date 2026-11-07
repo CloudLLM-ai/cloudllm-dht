@@ -1,5 +1,20 @@
 UNRELEASED
 
+  - feat(node,tracker,driver): the DHT node and its owner. Node: write
+    tokens with rotating secrets, ping/find_node/get_peers/announce_peer/
+    get/put/sample_infohashes handlers with libtorrent's error strings,
+    BEP 32 want across families, BEP 42 enforcement, BEP 43 read-only,
+    external-address reports as events, bootstrap/refresh/lookups. Dht (the
+    dht_tracker port): sockets per family, five-second tick, write-key
+    rotation, upload quota, dark-internet filter, IP filter, DoS blocker,
+    bounded decode, per-target aggregation of BEP 44 results across nodes,
+    state save. A tokio driver (feature tokio-driver) with an async
+    DhtHandle API; an in-memory simulation network; an opt-in live test
+    against the real Mainline DHT (verified: 307 peers for a known
+    info-hash, BEP 44 puts acknowledged by 7 and 8 nodes). Fixes a libtorrent
+    defect where a put with a key but no signature shadowed mutable items.
+    A node_incoming fuzz target covers the whole receive path.
+
   - feat(rpc,traversal): the rpc manager, observers and every traversal:
     transaction ids matched on endpoint, short (1 s) and full (15 s)
     timeouts, the sorted result list with branch factor and short-timeout
