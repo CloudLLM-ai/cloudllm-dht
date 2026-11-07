@@ -56,6 +56,10 @@ pub struct SimPeer {
     pub dht: Dht,
     /// Its sockets and their addresses.
     pub addrs: Vec<(SocketId, SocketAddr)>,
+    /// Whether it is on the network. An offline peer sends nothing, receives
+    /// nothing and its timers do not run, as if its host were switched off
+    /// (churn in `tests/soak.rs`); datagrams addressed to it are lost.
+    pub online: bool,
 }
 
 /// The network.
@@ -110,9 +114,38 @@ impl SimNet {
         for (id, a) in &addrs {
             self.by_addr.insert(*a, (idx, *id));
         }
-        self.peers.push(SimPeer { dht, addrs });
+        self.peers.push(SimPeer {
+            dht,
+            addrs,
+            online: true,
+        });
         self.dirty.insert(idx);
         idx
+    }
+
+    /// Puts `idx` on or off the network; see [`SimPeer::online`].
+    pub fn set_online(&mut self, idx: usize, online: bool) {
+        self.peers[idx].online = online;
+        self.dirty.insert(idx);
+    }
+
+    /// Replaces the peer at `idx` with a fresh `dht` (a new host taking over
+    /// the slot), online, at its own addresses. The old addresses stop
+    /// resolving.
+    pub fn replace_peer(&mut self, idx: usize, dht: Dht) {
+        for (_, a) in &self.peers[idx].addrs {
+            self.by_addr.remove(a);
+        }
+        let addrs: Vec<_> = dht.sockets().collect();
+        for (id, a) in &addrs {
+            self.by_addr.insert(*a, (idx, *id));
+        }
+        self.peers[idx] = SimPeer {
+            dht,
+            addrs,
+            online: true,
+        };
+        self.dirty.insert(idx);
     }
 
     /// Tells the network a peer was touched from outside (a test called one
@@ -124,6 +157,10 @@ impl SimNet {
     fn collect(&mut self) {
         let dirty = std::mem::take(&mut self.dirty);
         for idx in dirty {
+            if !self.peers[idx].online {
+                while self.peers[idx].dht.poll_transmit().is_some() {}
+                continue;
+            }
             while let Some(Datagram {
                 socket,
                 to,
@@ -159,7 +196,12 @@ impl SimNet {
     }
 
     fn next_event(&self) -> Option<Time> {
-        let timer = self.peers.iter().filter_map(|p| p.dht.next_timeout()).min();
+        let timer = self
+            .peers
+            .iter()
+            .filter(|p| p.online)
+            .filter_map(|p| p.dht.next_timeout())
+            .min();
         let arrival = self.queue.peek().map(|Reverse(f)| f.at);
         [timer, arrival].into_iter().flatten().min()
     }
@@ -184,6 +226,10 @@ impl SimNet {
             let now = self.clock.now();
             while self.queue.peek().is_some_and(|Reverse(f)| f.at <= now) {
                 let Reverse(f) = self.queue.pop().expect("peeked");
+                if !self.peers[f.to_peer].online {
+                    self.undeliverable += 1;
+                    continue;
+                }
                 self.delivered += 1;
                 self.peers[f.to_peer]
                     .dht
@@ -191,7 +237,9 @@ impl SimNet {
                 self.dirty.insert(f.to_peer);
             }
             for idx in 0..self.peers.len() {
-                if self.peers[idx].dht.next_timeout().is_some_and(|t| t <= now) {
+                if self.peers[idx].online
+                    && self.peers[idx].dht.next_timeout().is_some_and(|t| t <= now)
+                {
                     self.peers[idx].dht.poll(now);
                     self.dirty.insert(idx);
                 }
