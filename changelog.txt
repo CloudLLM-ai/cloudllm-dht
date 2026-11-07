@@ -1,5 +1,12 @@
 UNRELEASED
 
+  - feat(tracker,driver): every queue of a Dht is bounded (64 queued puts per
+    slot, 16 queued samples per endpoint, 64 operations per target, 4096 in
+    flight); an operation that does not fit ends at once with
+    Event::OperationRejected and OpError::QueueFull through DhtHandle, whose
+    calls now return Result<_, OpError>. Fix: a lookup never queries its own
+    node ID (found by the dht_ops fuzz target).
+
   - ci: the engineering pipeline of mentischat (docs/ENGINEERING.md): cargo-deny
     policy and Dependabot, a 90% coverage gate on regions, functions and lines,
     weekly fuzzing of every target, a weekly security review, weekly Criterion

@@ -55,7 +55,10 @@ with the lookup, `announce`, `bootstrap`, `sample_infohashes`,
 operation returns an `OpId`; its results arrive as `Event::Operation { op,
 result }` and it ends exactly once with `Event::OperationDone { op }` (or
 `Event::OperationCancelled { op }` on shutdown or socket removal), so
-concurrent operations on one target never mix.
+concurrent operations on one target never mix. Every queue is bounded: an
+operation that does not fit ends at once with `Event::OperationRejected`
+(`OpError::QueueFull` through `DhtHandle`, whose calls return `Result<_,
+OpError>`).
 
 `DhtHandle` also offers `announce`, `get_mutable`/`put_mutable` (BEP 44 with
 salt and compare-and-swap through the data callback), `sample_infohashes`
